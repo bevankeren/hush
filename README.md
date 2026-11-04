@@ -155,3 +155,13 @@ Combat6->1 toggle; total definisi toggle31->25. Silent Aim tetap tidak tersedia,
 tidak ada toggle untuk mencobanya, dan belum terbukti aman setelah first-shot crash.
 Tidak ada native weapon hooks yang diaktifkan ulang. Revisi ini lolos compile/tes
 unit bundle; belum diverifikasi live karena client tidak tersambung saat pengujian.
+
+
+### Tema Orchid
+
+Palet default mengikuti referensi purple/magenta: background `#210C30`, panel
+plum `#4A1B58`, accent pink-magenta `#D65EC8`, outline lilac `#9962B2`, teks
+`#F8E9FB`. Preset **Hush Orchid** tersedia di Config → Themes. Mengubah warna/tone,
+bukan menyalin ilustrasi papan kayu/jaring. Tidak menambah gambar atau animasi.
+Warna semantik ESP, termasuk Player LOS kuning/hijau, tidak berubah. Compile dan
+fixture penerapan tema lulus; tampilan live belum dicek karena client belum tersambung.

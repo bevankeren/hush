@@ -34,6 +34,26 @@ local GUI_CONTAINER_NAME = "Obsidian"
 -- state global
 -- ---------------------------------------------------------------------------
 
+-- Static Orchid palette: reference-inspired purple/magenta without animated assets.
+local UI_THEME_NAME = "Hush Orchid"
+local UI_THEME = {
+    BackgroundColor = "210C30",
+    MainColor = "4A1B58",
+    AccentColor = "D65EC8",
+    OutlineColor = "9962B2",
+    FontColor = "F8E9FB",
+    BackgroundImage = "",
+    Weather = "None",
+}
+
+local function apply_ui_palette(library)
+    for _, key in ipairs({ "BackgroundColor", "MainColor", "AccentColor", "OutlineColor", "FontColor" }) do
+        library.Scheme[key] = Color3.fromHex(UI_THEME[key])
+    end
+    library.Scheme.BackgroundImage = ""
+    library:UpdateColorsUsingRegistry()
+end
+
 local State = {
     connections = {},
     guis = {},
@@ -2651,12 +2671,16 @@ local function init_settings_tab(tab, ThemeManager, SaveManager)
     end
 
     pcall(function()
+        ThemeManager.BuiltInThemes[UI_THEME_NAME] = { 0, UI_THEME }
         ThemeManager:SetLibrary(getgenv().HushLibrary)
         SaveManager:SetLibrary(getgenv().HushLibrary)
         SaveManager:IgnoreThemeSettings()
         ThemeManager:SetFolder("hush")
         SaveManager:SetFolder("hush/" .. tostring(game.PlaceId))
         ThemeManager:ApplyToTab(tab)
+        local picker = getgenv().HushLibrary.Options.ThemeManager_ThemeList
+        if picker then picker:SetValue(UI_THEME_NAME) end
+        ThemeManager:ApplyThemeData(UI_THEME)
         SaveManager:BuildConfigSection(tab)
         -- Manual config loading only: fresh execution always starts OFF.
     end)
@@ -2684,10 +2708,11 @@ local function boot()
     end
 
     getgenv().HushLibrary = library
+    apply_ui_palette(library)
 
     local window = library:CreateWindow({
         Title = WINDOW_TITLE,
-        Footer = "v1.4.0 · Tactical Suite | " .. tostring(game.PlaceId),
+        Footer = "Orchid · Camera Suite | " .. tostring(game.PlaceId),
         Badge = "v1.4",
         Size = UDim2.fromOffset(720, 540),
         Center = true,
@@ -2708,6 +2733,7 @@ local function boot()
     init_player_audio_tab(player_tab)
     init_system_tab(system_tab)
     init_settings_tab(config_tab, load_module("addons/ThemeManager.lua"), load_module("addons/SaveManager.lua"))
+    apply_ui_palette(library)
 
     -- Enforce cold-start OFF, including library-created toggles.
     for _, toggle in pairs(library.Toggles) do

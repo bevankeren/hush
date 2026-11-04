@@ -62,6 +62,7 @@ local State = {
     esp = {
         enabled = true,
         declutter = false,
+        healthbars = false,
         outline_monsters = false,
         outline_players = false,
         outline_containers = false,
@@ -82,11 +83,11 @@ local State = {
         traps = false,
         players = false,
         loot_high_tier_only = false,
-        max_monster_dist = 1500,
-        max_loot_dist = 800,
-        max_container_dist = 250,
-        max_trap_dist = 40,
-        max_player_dist = 1500,
+        max_monster_dist = 1000,
+        max_loot_dist = 1000,
+        max_container_dist = 1000,
+        max_trap_dist = 1000,
+        max_player_dist = 1000,
         folder = nil,
         cache_tags = {},         -- [Instance] = { bbg, l1, l2, adornee }
         cache_highlights = {},   -- [Instance] = { hl, adornee }
@@ -112,6 +113,8 @@ local State = {
         fullbright = false,
         remove_fog = false,
         fb_undo = {},
+        fb_connections = {},
+        fb_guard = false,
         fog_undo = {},
     },
     movement = {
@@ -138,7 +141,8 @@ local State = {
     aim = {
         enabled = false,
         mode = "camera",          -- "camera" | "silent" | "look"
-        fov = 90,
+        fov = 35,
+        profile = "humanize",
         fov_origin = "center",    -- "center" | "mouse"
         fov_circle = false,
         fov_circle_color = Color3.fromRGB(255, 80, 80),
@@ -147,7 +151,7 @@ local State = {
         activation_picker = nil,
         always_on = false,
         smooth = 35,
-        max_distance = 600,
+        max_distance = 1000,
         bone = "vital",           -- "vital" | "head" | "body" | "legs"
         gravity_comp = false,
         visible_only = false,
@@ -252,6 +256,8 @@ local function teardown()
     pcall(clear_esp)
     cancel_threads()
     disconnect_all()
+    local lib = State.session.library
+    if lib and not lib.Unloaded and type(lib.Unload) == "function" then pcall(lib.Unload, lib) end
     destroy_guis()
     if getgenv().HushSession == State.session then
         getgenv().HushSession = nil
@@ -263,8 +269,27 @@ State.session = { teardown = teardown, state = State, active = true }
 local previous = getgenv().HushSession
 if previous and type(previous.teardown) == "function" then
     pcall(previous.teardown)
+    local old_library = previous.library
+    if old_library and not old_library.Unloaded and type(old_library.Unload) == "function" then
+        pcall(old_library.Unload, old_library)
+    end
 end
 getgenv().HushSession = State.session
+
+-- Retire only this project's obsolete picker callbacks after switching to fixed RMB.
+-- Older UI releases left InputObject.Changed callbacks alive after their GUI was destroyed.
+if type(filtergc) == "function" then
+    local ok, pickers = pcall(filtergc, "table", { KeyValuePairs = { Idx = "HushAimKeybind", Type = "KeyPicker" } }, false)
+    if ok then
+        for _, picker in ipairs(pickers) do
+            if type(picker.GetState) == "function" and type(picker.Update) == "function" and not picker._HushRetired then
+                picker._HushRetired = true
+                picker.SyncToggleState, picker.Toggled = false, false
+                picker.Update, picker.Callback, picker.Clicked = function() end, function() end, function() end
+            end
+        end
+    end
+end
 
 -- ---------------------------------------------------------------------------
 -- helper pembacaan, penulisan & UI kompatibilitas
@@ -324,11 +349,12 @@ end
 -- ---------------------------------------------------------------------------
 
 local function restore_fullbright_only()
-    for _, entry in ipairs(State.visuals.fb_undo) do
-        write_property(entry.object, entry.prop, entry.value)
-    end
-    table.clear(State.visuals.fb_undo)
     State.visuals.fullbright = false
+    for _, connection in ipairs(State.visuals.fb_connections) do connection:Disconnect() end
+    table.clear(State.visuals.fb_connections)
+    for _, entry in ipairs(State.visuals.fb_undo) do write_property(entry.object, entry.prop, entry.value) end
+    table.clear(State.visuals.fb_undo)
+    State.visuals.fb_guard = false
 end
 
 local function restore_fog_only()
@@ -345,21 +371,32 @@ function restore_visuals()
 end
 
 local function apply_fullbright(enabled)
-    if not enabled then
-        restore_fullbright_only()
-        return
-    end
-    if #State.visuals.fb_undo == 0 then
-        local props = { "Ambient", "OutdoorAmbient", "Brightness", "ClockTime" }
-        for _, p in ipairs(props) do
-            record_property_once(State.visuals.fb_undo, nil, Lighting, p)
-        end
-    end
+    if not enabled then restore_fullbright_only(); return end
+    if State.visuals.fullbright then return end
     State.visuals.fullbright = true
-    write_property(Lighting, "Ambient", Color3.fromRGB(160, 160, 160))
-    write_property(Lighting, "OutdoorAmbient", Color3.fromRGB(160, 160, 160))
-    write_property(Lighting, "Brightness", 2.2)
-    write_property(Lighting, "ClockTime", 14)
+    local desired = {
+        Ambient = Color3.fromRGB(210, 210, 210),
+        OutdoorAmbient = Color3.fromRGB(210, 210, 210),
+        Brightness = 2.5,
+        ExposureCompensation = 0.35,
+    }
+    -- Track the latest game-authored value so OFF resumes the live lighting cycle.
+    for prop, value in pairs(desired) do
+        local entry = { object = Lighting, prop = prop, value = read_property(Lighting, prop) }
+        table.insert(State.visuals.fb_undo, entry)
+        local function enforce()
+            if not State.visuals.fullbright or State.visuals.fb_guard then return end
+            local actual = read_property(Lighting, prop)
+            if actual ~= value then
+                entry.value = actual
+                State.visuals.fb_guard = true
+                write_property(Lighting, prop, value)
+                State.visuals.fb_guard = false
+            end
+        end
+        write_property(Lighting, prop, value)
+        table.insert(State.visuals.fb_connections, Lighting:GetPropertyChangedSignal(prop):Connect(enforce))
+    end
 end
 
 local function apply_remove_fog(enabled)
@@ -640,6 +677,17 @@ local function esp_escape(text)
     return tostring(text):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
 end
 
+local function read_esp_health(model)
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    local health = hum and hum.Health or model:GetAttribute("Health") or model:GetAttribute("HP")
+    local maximum = hum and hum.MaxHealth or model:GetAttribute("MaxHealth") or model:GetAttribute("MaxHP")
+    if type(health) ~= "number" or type(maximum) ~= "number" or health ~= health
+        or maximum ~= maximum or maximum <= 0 or maximum == math.huge or math.abs(health) == math.huge then
+        return nil, nil
+    end
+    return math.clamp(health, 0, maximum), maximum
+end
+
 local function render_esp_billboard(key, target_part, primary_text, secondary_text, accent_color, offset_y, is_compact, seen_tags, category)
     seen_tags[key] = true
     local entry = State.esp.cache_tags[key]
@@ -696,6 +744,32 @@ local function render_esp_billboard(key, target_part, primary_text, secondary_te
     entry.mark.BackgroundColor3 = accent_color or Color3.fromRGB(180, 190, 200)
     entry.l1.TextColor3 = category == "players" and accent_color or Color3.fromRGB(237, 239, 241)
     entry.compact = is_compact
+    entry.hp_ratio = nil
+    if State.esp.healthbars and (category == "players" or category == "monsters") then
+        local health, maximum = read_esp_health(key)
+        if health then
+            if not entry.health_track then
+                local track = Instance.new("Frame")
+                track.Name = "HealthTrack"
+                track.BorderSizePixel = 0
+                track.BackgroundColor3 = Color3.fromRGB(15, 13, 20)
+                track.BackgroundTransparency = 0.15
+                track.Size = UDim2.new(1, -14, 0, 3)
+                track.Parent = entry.bbg
+                local fill = Instance.new("Frame")
+                fill.Name = "HealthFill"
+                fill.BorderSizePixel = 0
+                fill.Parent = track
+                entry.health_track, entry.health_fill = track, fill
+            end
+            local ratio = health / maximum
+            entry.hp_ratio, entry.hp_current, entry.hp_max = ratio, health, maximum
+            entry.health_fill.Size = UDim2.fromScale(ratio, 1)
+            entry.health_fill.BackgroundColor3 = ratio <= 0.25 and Color3.fromRGB(245, 85, 85)
+                or ratio <= 0.5 and Color3.fromRGB(255, 205, 65) or Color3.fromRGB(85, 225, 145)
+        end
+    end
+    if entry.health_track then entry.health_track.Visible = entry.hp_ratio ~= nil end
     local now = os.clock()
     if now < (entry.next_text or 0) then return end
     local distance = (target_part.Position - get_origin_pos()).Magnitude
@@ -736,10 +810,6 @@ local function render_highlight(key, model, fill_color, outline_color, fill_tran
 end
 
 local function upsert_esp_billboard(key, part, text, detail, color, offset, compact, seen, category)
-    local cam = workspace.CurrentCamera
-    if not cam then return end
-    local screen, visible = cam:WorldToViewportPoint(part.Position + Vector3.new(0, offset or 3.2, 0))
-    if not visible or screen.Z <= 0 then return end
     local args = { key, part, text, detail, color, offset, compact, seen, category }
     table.insert(State.esp.pending_tags, { args = args, distance = (part.Position - State.esp.cycle_origin).Magnitude,
         locked = key == State.aim.locked_model })
@@ -800,7 +870,13 @@ local function layout_esp_labels(origin)
             )
             entry.l2.Visible = not entry.compact and (locked or distance <= State.esp.detail_distance)
                 and entry.l2.Text ~= ""
-            local height = entry.l2.Visible and 32 or 17
+            local text_height = entry.l2.Visible and 32 or 17
+            local show_health = State.esp.healthbars and entry.health_track and entry.hp_ratio ~= nil
+            if entry.health_track then
+                entry.health_track.Visible = not not show_health
+                entry.health_track.Position = UDim2.fromOffset(7, text_height + 1)
+            end
+            local height = text_height + (show_health and 6 or 0)
             local plain = entry.l1.Text:gsub("<[^>]+>", ""):gsub("%d+ st", "0000 st")
             if entry.measure_key ~= plain then
                 entry.measure_key = plain
@@ -816,6 +892,7 @@ local function layout_esp_labels(origin)
             local quiet = State.esp.declutter and not locked and not urgent
                 and math.abs(screen.X - cx) < 85 and math.abs(screen.Y - cy) < 55
             local x, y = screen.X - width * 0.5, screen.Y - height * 0.5
+            if not on_screen or screen.Z <= 0 then entry.bbg.Enabled = true end
             if on_screen and screen.Z > 0 and not quiet and x >= 8 and y >= 52
                 and x + width <= viewport.X - 8 and y + height <= viewport.Y - 32 then
                 table.insert(candidates, {
@@ -1152,7 +1229,7 @@ local function run_esp_cycle()
                 color,
                 4.2,
                 false,
-                seen_tags
+                seen_tags, "monsters"
             )
         end
 
@@ -1314,7 +1391,7 @@ local function run_esp_cycle()
                 if oroot then
                     local dist = (oroot.Position - my_pos).Magnitude
                     if dist <= State.esp.max_player_dist then
-                        local hp_num = ohum and ohum.Health or 100
+                        local hp_num = ohum and ohum.Health or nil
                         local visible = player_is_visible(ochar, oroot)
                         local p_color = visible and Color3.fromRGB(85, 225, 145) or Color3.fromRGB(255, 205, 65)
                         upsert_highlight(ochar, ochar, p_color, p_color, 1, seen_hl, "players")
@@ -1322,7 +1399,7 @@ local function run_esp_cycle()
                             ochar,
                             oroot,
                             string.format("%s  <font color='#a8afb9'>%.0f st</font>", esp_escape(p.DisplayName), dist),
-                            string.format("%.0f HP · %s", hp_num, visible and "Visible" or "Occluded / unchecked"),
+                            string.format("%s HP · %s", hp_num and string.format("%.0f", hp_num) or "?", visible and "Visible" or "Occluded / unchecked"),
                             p_color,
                             3.6,
                             false,
@@ -1564,6 +1641,7 @@ local function aim_visible(origin, target_part, target_model)
     local char = Players.LocalPlayer and Players.LocalPlayer.Character
     local exclude = {}
     if char then exclude[#exclude + 1] = char end
+    if workspace.CurrentCamera then exclude[#exclude + 1] = workspace.CurrentCamera end
     if State.esp.folder then exclude[#exclude + 1] = State.esp.folder end
 
     local root_model = target_model or target_part.Parent
@@ -1653,7 +1731,7 @@ local function aim_pick_vital(model, origin, require_vis)
                 local score = (part.Position - origin).Magnitude + rank * 1.5
                 if score < best_score then best_any, best_score = part, score end
                 if require_vis and score < vis_score and aim_visible(origin, part, model) then
-                    best_vis, vis_score = part, score
+                    return part, true
                 end
             end
         end
@@ -1664,7 +1742,7 @@ local function aim_pick_vital(model, origin, require_vis)
             if (State.aim.rays_left or 16) <= 0 then break end
             if part.Parent then
                 local score = (part.Position - origin).Magnitude
-                if score < vis_score and aim_visible(origin, part, model) then best_vis, vis_score = part, score end
+                if score < vis_score and aim_visible(origin, part, model) then return part, true end
             end
         end
         if best_vis then return best_vis, true end
@@ -1793,7 +1871,7 @@ local function evaluate_single_model(model, kind, origin, fwd, cam, ref_screen, 
     end
 
     local screen_dist = (Vector2.new(screen.X, screen.Y) - ref_screen).Magnitude
-    if State.aim.fov_origin == "mouse" and State.aim.fov < 180 then
+    if State.aim.fov < 180 then
         local gate_px = is_sticky_check and (max_radius_px * 1.15) or max_radius_px
         if screen_dist > gate_px then return nil end
     end
@@ -1833,6 +1911,8 @@ local function aim_scan_target()
         if kept then
             if State.aim.sticky_lock then return kept end
             pool[1] = kept
+        else
+            previous = nil
         end
     end
     local now = os.clock()
@@ -1853,6 +1933,20 @@ local function aim_scan_target()
         State.aim.roster_cursor = State.aim.roster_cursor or 1
     end
     local roster = State.aim.roster or {}
+    if not previous or not previous.model.Parent or not is_model_alive(previous.model) then
+        for _, entry in ipairs(roster) do
+            local model = entry.model
+            local root = model.PrimaryPart or model:FindFirstChild("HumanoidRootPart") or model:FindFirstChildWhichIsA("BasePart")
+            local delta = root and root.Position - origin
+            local distance = delta and delta.Magnitude or math.huge
+            entry.alignment = distance > 0 and distance < math.huge and fwd:Dot(delta / distance) or -2
+            entry.distance = distance
+        end
+        table.sort(roster, function(a, b)
+            if a.alignment ~= b.alignment then return a.alignment > b.alignment end
+            return a.distance < b.distance
+        end)
+    end
     local slice = os.clock()
     local evaluated = 0
     for i = 1, math.min(8, #roster) do
@@ -1902,45 +1996,26 @@ end
 -- Rotasi kamera berbasis sudut bola sejati (bebas camera roll miring):
 -- Menginterpolasi vektor arah pandang dengan batas kecepatan sudut per-frame,
 -- lalu membangun CFrame.lookAt tegak lurus terhadap Vector3.yAxis.
-local function aim_step_towards(cam, target_pos)
-    local current_cf = cam.CFrame
-    local origin = current_cf.Position
-    local current_look = current_cf.LookVector
+local function finite_vector(value)
+    return typeof(value) == "Vector3" and value.X == value.X and value.Y == value.Y and value.Z == value.Z
+        and math.abs(value.X) < 1e8 and math.abs(value.Y) < 1e8 and math.abs(value.Z) < 1e8
+end
+
+local function aim_step_towards(cam, target_pos, dt)
+    local current = cam.CFrame
+    local origin = current.Position
+    if not finite_vector(target_pos) or not finite_vector(origin) then return current end
     local delta = target_pos - origin
-    if delta.Magnitude < 0.01 then return current_cf end
-    local desired_look = delta.Unit
-
-    local dot = math.clamp(current_look:Dot(desired_look), -1, 1)
-    local total_deg = math.deg(math.acos(dot))
-    if total_deg < 0.02 then return current_cf end
-
-    local fraction = math.clamp(State.aim.smooth, 2, 100) / 100
-    local step_deg = total_deg * fraction
-
-    local ceiling = math.min(AIM_SNAP_GUARD_DEG, AIM_MAX_GAIN_DEG)
-    if step_deg > ceiling then
-        step_deg = ceiling
-    elseif step_deg < AIM_MIN_STEP_DEG and total_deg > AIM_MIN_STEP_DEG then
-        step_deg = AIM_MIN_STEP_DEG
-    end
-
-    local alpha = math.clamp(step_deg / total_deg, 0, 1)
-    local desired_cf = CFrame.lookAt(origin, origin + desired_look, Vector3.yAxis)
-    local next_cf = current_cf:Lerp(desired_cf, alpha)
-
-    -- Jitter sudut mikro agar kurva angular velocity menyerupai tangan manusia
-    local jitter_rad = math.rad(AIM_JITTER_DEG)
-    local jx = (math.random() - 0.5) * jitter_rad
-    local jy = (math.random() - 0.5) * jitter_rad
-    local noisy_look = (next_cf * CFrame.Angles(jx, jy, 0)).LookVector
-
-    State.aim.aim_delta_deg = step_deg
-    if step_deg > State.aim.stats.peak_deg then
-        State.aim.stats.peak_deg = step_deg
-    end
+    if delta.Magnitude < 0.01 then return current end
+    local direction = delta.Unit
+    local up = math.abs(direction.Y) > 0.98 and Vector3.xAxis or Vector3.yAxis
+    local desired = CFrame.lookAt(origin, target_pos, up)
+    local alpha = State.aim.profile == "blatant" and 1 or (1 - math.exp(-18 * math.clamp(dt or 1/60, 0.001, 0.1)))
+    local result = State.aim.profile == "blatant" and desired or current:Lerp(desired, alpha)
+    State.aim.aim_delta_deg = math.deg(math.acos(math.clamp(current.LookVector:Dot(result.LookVector), -1, 1)))
+    State.aim.stats.peak_deg = math.max(State.aim.stats.peak_deg or 0, State.aim.aim_delta_deg)
     State.aim.stats.steps = (State.aim.stats.steps or 0) + 1
-
-    return CFrame.lookAt(origin, origin + noisy_look, Vector3.yAxis)
+    return result
 end
 
 
@@ -1991,6 +2066,7 @@ end
 
 local function is_trigger_active()
     return State.aim.enabled and UserInputService:GetFocusedTextBox() == nil
+        and UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
 end
 
 local function apply_aim(enabled)
@@ -2013,16 +2089,24 @@ local function apply_aim(enabled)
         while State.session.active and State.aim.enabled do
             if not is_trigger_active() then
                 State.aim.target_cache = nil
+                State.aim.roster_at, State.aim.roster_cursor = 0, 1
                 task.wait(0.05)
                 continue
             end
             local start = os.clock()
             local ok, target = pcall(aim_scan_target)
             if ok then
+                State.aim.scan_failures = 0
                 State.aim.target_cache = target
                 State.aim.target_cache_at = os.clock()
             else
                 State.aim.target_cache = nil
+                State.aim.scan_failures = (State.aim.scan_failures or 0) + 1
+                if State.aim.scan_failures >= 3 then
+                    local lib = getgenv().HushLibrary
+                    if lib and lib.Toggles.HushAimToggle then lib.Toggles.HushAimToggle:SetValue(false) end
+                    return
+                end
                 if os.clock() - (State.aim.last_scan_error or -10) > 5 then
                     State.aim.last_scan_error = os.clock()
                     warn("[hush] target scan: " .. tostring(target))
@@ -2030,33 +2114,28 @@ local function apply_aim(enabled)
             end
             State.aim.scan_ms = (os.clock() - start) * 1000
             State.aim.scan_count = (State.aim.scan_count or 0) + 1
-            task.wait(State.perf.potato and 0.25 or 0.15)
+            task.wait(State.perf.potato and 0.18 or (State.aim.profile == "blatant" and 0.08 or 0.12))
         end
     end)
     State.aim.scan_worker = worker
 
-    aim_conn = RunService.RenderStepped:Connect(function()
+    local function step(dt)
         if not State.aim.enabled then
             if fov_circle then fov_circle.Visible = false end
             return
         end
 
         local cam = workspace.CurrentCamera
-        if not cam then return end
+        if not cam then
+            State.aim.locked, State.aim.locked_model = nil, nil
+            if fov_circle then fov_circle.Visible = false end
+            return
+        end
 
         State.aim.stats.frames = (State.aim.stats.frames or 0) + 1
 
         local now = os.clock()
-        if now < State.aim.hold_off then
-            update_fov_circle()
-            return
-        end
-
-        local target = aim_get_current_target()
-        if target and State.aim.locked and target.model ~= State.aim.locked.model then
-            State.aim.hold_off = now + AIM_HOLD_OFF_SECONDS
-            aim_note_victim(State.aim.locked.model)
-        end
+        local target = is_trigger_active() and aim_get_current_target() or nil
         State.aim.locked = target
         State.aim.locked_model = target and target.model or nil
 
@@ -2072,7 +2151,7 @@ local function apply_aim(enabled)
         end
         local ballistics = State.aim.frame_ballistics
         local target_pos = aim_solve_point(
-            muzzle_origin, target.part.Position, target.part.AssemblyLinearVelocity, ballistics, true
+            muzzle_origin, target.part.Position, target.part.AssemblyLinearVelocity, ballistics, false
         )
 
         if State.aim.stats.acquired == 0 or State.aim.last_acquired_model ~= target.model then
@@ -2081,8 +2160,23 @@ local function apply_aim(enabled)
         end
 
         if State.aim.mode == "camera" then
-            cam.CFrame = aim_step_towards(cam, target_pos)
+            cam.CFrame = aim_step_towards(cam, target_pos, dt)
 
+        end
+    end
+    aim_conn = RunService.RenderStepped:Connect(function(dt)
+        local ok, err = pcall(step, dt)
+        if ok then State.aim.consecutive_errors = 0; return end
+        State.aim.target_cache, State.aim.locked, State.aim.locked_model = nil, nil, nil
+        State.aim.consecutive_errors = (State.aim.consecutive_errors or 0) + 1
+        State.aim.last_error = tostring(err)
+        if os.clock() - (State.aim.last_error_at or -10) > 5 then
+            State.aim.last_error_at = os.clock()
+            warn("[hush] Camera aim paused: " .. tostring(err))
+        end
+        if State.aim.consecutive_errors >= 3 then
+            local lib = getgenv().HushLibrary
+            if lib and lib.Toggles.HushAimToggle then lib.Toggles.HushAimToggle:SetValue(false) end
         end
     end)
 end
@@ -2163,16 +2257,6 @@ local function safe_label_write(label, text)
 end
 
 -- TAB 1: COMBAT (Aimbot + Weapon Mods & Diagnostics)
-local function set_aim_always(enabled)
-    State.aim.always_on = enabled
-    local picker = State.aim.activation_picker
-    if picker then picker.SyncToggleState = not enabled end
-    local lib = getgenv().HushLibrary
-    if lib and lib.Toggles.HushAimToggle then
-        lib.Toggles.HushAimToggle:SetValue(enabled)
-    end
-end
-
 local function init_combat_tab(tab)
     local panel = tab:AddGroupbox({ Side = "Left", Name = "Aimbot", IconName = "crosshair" })
     local aim_toggle = panel:AddToggle("HushAimToggle", {
@@ -2180,16 +2264,11 @@ local function init_combat_tab(tab)
         Tooltip = "Includes FOV circle, sticky lock, visible-target checking, alternate visible hitbox and ballistic lead. Camera only: no weapon hooks.",
         Callback = function(v) apply_aim(v) end,
     })
-    State.aim.activation_picker = aim_toggle:AddKeyPicker("HushAimKeybind", {
-        Default = "MB2", Mode = "Hold", Modes = { "Hold", "Toggle" },
-        SyncToggleState = true, Text = "Aimbot activation",
+    panel:AddLabel("Activation: hold RIGHT MOUSE (fixed).")
+    panel:AddDropdown("HushAimProfile", {
+        Text = "Aim speed", Values = { "Humanize", "Blatant" }, Default = "Humanize",
+        Callback = function(v) State.aim.profile = v == "Blatant" and "blatant" or "humanize" end,
     })
-    panel:AddToggle("HushAimAlways", {
-        Text = "Always On (no hold)", Default = false,
-        Tooltip = "Enables Camera Aimbot continuously and ignores key release. Main Camera Aimbot switch still stops aim; typing still pauses it. Turn this OFF to return to keybind control.",
-        Callback = function(v) set_aim_always(v) end,
-    })
-    panel:AddLabel("Click key box to rebind; right-click: Hold / Toggle.")
     panel:AddLabel("FOV + lock + visibility + lead: included.")
     panel:AddDropdown("HushAimBone", {
         Text = "Hitbox", Values = { "Vital", "Kepala", "Badan", "Kaki" }, Default = "Vital",
@@ -2207,15 +2286,12 @@ local function init_combat_tab(tab)
     })
     local settings = tab:AddGroupbox({ Side = "Right", Name = "Aim Settings", IconName = "settings" })
     settings:AddSlider("HushAimFov", {
-        Text = "FOV", Default = 90, Min = 10, Max = 360, Rounding = 0, Suffix = "°",
+        Text = "FOV angle", Default = 35, Min = 10, Max = 120, Rounding = 0, Suffix = "°",
         Callback = function(v) State.aim.fov = v end,
     })
-    settings:AddSlider("HushAimSmooth", {
-        Text = "Smoothness", Default = 35, Min = 2, Max = 100, Rounding = 0, Suffix = "%",
-        Callback = function(v) State.aim.smooth = v end,
-    })
+
     settings:AddSlider("HushAimDist", {
-        Text = "Distance", Default = 600, Min = 50, Max = 1500, Rounding = 0, Suffix = " st",
+        Text = "Distance", Default = 1000, Min = 50, Max = 1000, Rounding = 0, Suffix = " st",
         Callback = function(v) State.aim.max_distance = v end,
     })
     settings:AddLabel("Camera-only compatibility build.")
@@ -2226,6 +2302,11 @@ end
 local function init_visuals_tab(tab)
     local layout = tab:AddGroupbox({ Side = "Left", Name = "ESP Layout", IconName = "scan-eye" })
     layout:AddLabel("Anti-overlap and player visibility: automatic.")
+    layout:AddToggle("HushESPHealthbar", {
+        Text = "Healthbars (players / creatures)", Default = false,
+        Tooltip = "Small HP bar on allocated ESP labels. Uses replicated Humanoid/health and max-health data only; hidden if unavailable.",
+        Callback = function(v) State.esp.healthbars = v end,
+    })
     layout:AddSlider("HushESPInstances", {
         Text = "Label objects (nearest first)", Default = 48, Min = 12, Max = 96, Rounding = 0,
         Callback = function(v) State.esp.render_limit = v end,
@@ -2264,9 +2345,9 @@ local function init_visuals_tab(tab)
 
     panel_ent:AddSlider("HushMonsterDist", {
         Text = "Monster Distance",
-        Default = 1500,
+        Default = 1000,
         Min = 200,
-        Max = 2500,
+        Max = 1000,
         Rounding = 0,
         Suffix = " st",
         Callback = function(v) State.esp.max_monster_dist = v end,
@@ -2289,9 +2370,9 @@ local function init_visuals_tab(tab)
 
     panel_ent:AddSlider("HushPlayerDist", {
         Text = "Player Distance",
-        Default = 1500,
+        Default = 1000,
         Min = 200,
-        Max = 2500,
+        Max = 1000,
         Rounding = 0,
         Suffix = " st",
         Callback = function(v) State.esp.max_player_dist = v end,
@@ -2314,9 +2395,9 @@ local function init_visuals_tab(tab)
 
     panel_ent:AddSlider("HushTrapDist", {
         Text = "Trap Distance",
-        Default = 40,
+        Default = 1000,
         Min = 20,
-        Max = 100,
+        Max = 1000,
         Rounding = 0,
         Suffix = " st",
         Callback = function(v) State.esp.max_trap_dist = v end,
@@ -2331,7 +2412,7 @@ local function init_visuals_tab(tab)
     panel_env:AddToggle("HushFullbright", {
         Text = "Fullbright (Nightvision)",
         Default = false,
-        Tooltip = "Terangi area gelap dan bunker tanpa merusak state kabut.",
+        Tooltip = "Maintain ambient light, brightness and exposure against the game lighting cycle. OFF resumes latest game values; fog remains separate.",
         Callback = function(v) apply_fullbright(v) end,
     })
 
@@ -2370,7 +2451,7 @@ local function init_visuals_tab(tab)
 
     panel_loot:AddSlider("HushContainerDist", {
         Text = "Container Distance",
-        Default = 250,
+        Default = 1000,
         Min = 50,
         Max = 1000,
         Rounding = 0,
@@ -2418,9 +2499,9 @@ local function init_visuals_tab(tab)
 
     panel_loot:AddSlider("HushLootDist", {
         Text = "Ground Loot Distance",
-        Default = 800,
+        Default = 1000,
         Min = 100,
-        Max = 2000,
+        Max = 1000,
         Rounding = 0,
         Suffix = " st",
         Callback = function(v) State.esp.max_loot_dist = v end,
@@ -2724,6 +2805,7 @@ local function boot()
     end
 
     getgenv().HushLibrary = library
+    State.session.library = library
     apply_ui_palette(library)
 
     local window = library:CreateWindow({

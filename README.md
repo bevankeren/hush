@@ -1,5 +1,11 @@
 # hush
 
+> **Kontrol terbaru:** satu Camera Aimbot ON/OFF, aktivasi selalu **tahan klik kanan**.
+> Tidak ada Always On/keypicker. Profil **Humanize / Blatant**, FOV default35°.
+> ESP memproses semua arah dalam1000 stud (tetap memakai budget objek terdekat).
+> Fullbright kini dijaga terhadap overwrite game; Healthbars tersedia di ESP Layout.
+
+
 > **Build saat ini: camera-only compatibility.** Silent/Look Aim, No Recoil,
 > No Spread dan voice blocking dikarantina setelah laporan force-close saat
 > tembakan pertama. Tidak ada hook namecall/sight/spread atau penulisan upvalue
@@ -64,7 +70,7 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/bevankeren/hush/main/
   menurunkan efek grafis dan kepadatan ESP; tidak menyalakan ESP/aimbot secara otomatis.
 - Container memakai indeks event-driven, bukan scan seluruh Workspace setiap 3 detik.
 - Discovery target dipisah dari render, dengan cache rig dan penyaringan jarak/FOV awal.
-  Pencarian dibatasi maksimal 6,7 Hz (4 Hz pada Potato); tracking tetap per-frame.
+  Pencarian dibatasi sesuai profil: Humanize jeda0,12s, Blatant0,08s, Potato0,18s; tracking tetap per-frame.
   Mode kamera/look menunggu tombol aktivasi sebelum mencari target.
 - Flat scenery hanya mengubah properti visual di `Town.Details`/`Town.Wild`.
   Material, collision, prompt, karakter dan geometri tidak dihapus/diubah.
@@ -167,10 +173,36 @@ Warna semantik ESP, termasuk Player LOS kuning/hijau, tidak berubah. Compile dan
 fixture penerapan tema lulus; tampilan live belum dicek karena client belum tersambung.
 
 
-### Always On (opsional)
+### Riwayat: Always On (sudah dihapus; kini fixed hold RMB)
 
 Di Combat, aktifkan **Always On (no hold)** untuk sekaligus menyalakan Camera
 Aimbot tanpa menahan tombol. Key release tidak mematikannya. Master Camera Aimbot
 OFF tetap menghentikan aim; mengetik juga menjeda tracking. Nonaktifkan Always On
 untuk menghentikan aim dan kembali ke kontrol keybind Hold/Toggle. Ini setting mode,
 bukan auto-start: fresh execute tetap semua toggle OFF. Camera-only tetap berlaku.
+
+
+### Fullbright, healthbars, 360 ESP dan profil hold-RMB
+
+- Fullbright: Ambient/OutdoorAmbient210, Brightness2,5, Exposure0,35. Empat property
+  guards menahan overwrite game; OFF mengembalikan nilai terakhir dari siklus game.
+  ClockTime, fog dan efek game tidak ditimpa oleh fitur ini. Guard dilepas saat OFF/unload.
+- Healthbars (players / creatures): aktifkan di ESP Layout bersama ESP kategori.
+  HP/MaxHP dari Humanoid atau atribut terverifikasi, tidak mengarang HP maksimum;
+  bar disembunyikan bila datanya tidak ada. Tidak berlaku untuk loot biasa.
+- ESP tidak lagi menolak objek karena arah kamera; data/health tetap diperbarui di
+  belakang kamera. Billboard belakang di-clip oleh renderer Roblox, bukan muncul
+  di tengah layar sebagai penanda palsu. Angka default/batas jarak1000 stud.
+  Budget normal48 label/24 outline dan Potato20/12 tetap memilih objek terdekat;
+  tidak semua objek dalam radius dijamin tampil jika budget penuh.
+- Satu master aim + fixed hold RMB. Lepas RMB berhenti tracking, mengetik menjeda.
+  Humanize cepat dengan smoothing eksponensial18/s; Blatant direct camera look.
+  Tidak ada jitter acak. Tetap camera-only; akurasi kamera bukan jaminan hit server
+  atau lolos anticheat. FOV35° default, bisa10..120; range aim maksimal1000 stud.
+- Local camera/viewmodel dikecualikan dari aim visibility; first visible hitbox,
+  prioritas arah crosshair saat mencari target, tanpa holdoff1,4 detik lama.
+  Target harus hidup, terlihat, dalam jarak dan FOV agar lock/ring hijau.
+- Fail-safe: NaN/extreme vector dan arah vertikal dijaga, error render/scan dibatasi
+  dan aim OFF setelah3 error berturut-turut. Library UI di-unload dengan benar;
+  callback Hush keypicker lama dikarantina secara spesifik saat boot. Bukan jaminan
+  tidak pernah ada error/native crash; tidak ada tembakan otomatis dalam tes ini.

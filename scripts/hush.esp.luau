@@ -152,7 +152,7 @@ local State = {
         always_on = false,
         smooth = 35,
         max_distance = 1000,
-        bone = "vital",           -- "vital" | "head" | "body" | "legs"
+        bone = "body",           -- "vital" | "head" | "body" | "legs"
         gravity_comp = false,
         visible_only = false,
         wall_fallback = false,     -- jika part utama tertutup, cari part lain yang terlihat
@@ -1451,9 +1451,7 @@ local AIM_BONES = {
         "JawPlateF", "JawPlateT", "JawPlateL", "JawPlateB", "Gum", "Throat", "EarDrum",
     },
     body = {
-        "Chest", "Ribs", "Belly", "Neck", "Core", "Ball",
-        "UpperTorso", "LowerTorso", "Torso", "HumanoidRootPart",
-        "UpperArmR", "UpperArmL", "UpperArmB", "UpperBL", "UpperFL",
+        "UpperTorso", "Torso", "Chest", "LowerTorso", "Belly", "Ribs", "HumanoidRootPart",
     },
     legs = {
         "ThighFR", "ThighFL", "ThighBR", "ThighBL",
@@ -1504,6 +1502,7 @@ local function aim_gun_def()
     -- 1. Prioritaskan heldId() langsung dari modul Client.Guns agar saat ganti
     -- antara senjata utama (SlotMain) dan pistol (SlotSide) kecepatan peluru selalu akurat
     local slot = nil
+    local held_api_known = false
     pcall(function()
         local ps = player:FindFirstChild("PlayerScripts")
         local cl = ps and ps:FindFirstChild("Client")
@@ -1519,6 +1518,7 @@ local function aim_gun_def()
         end
     end)
 
+    if held_api_known and not slot then return nil, nil end
     -- 2. Fallback ke atribut Character / Player jika sedang tidak memegang senjata di tangan
     if not slot then
         local char = player.Character
@@ -1572,14 +1572,16 @@ local function aim_ballistics()
     local pellets = 1
 
     if def then
-        velocity = tonumber(def.velocity) or velocity
+        velocity = tonumber(def.velocity) or tonumber(def.vel) or velocity
         gravity = tonumber(def.drop) or gravity
         range = tonumber(def.range) or range
         pen = tonumber(def.pen) or pen
         pellets = tonumber(def.pellets) or pellets
     end
     return {
-        slot = slot or "default",
+        slot = slot or "none",
+        valid = def ~= nil and (tonumber(def.velocity) or tonumber(def.vel) or 0) > 0,
+        known_range = def and tonumber(def.range) or nil,
         velocity = math.max(velocity, 100),
         gravity = gravity,
         range = range,
@@ -1609,6 +1611,7 @@ end
 -- Dengan memasukkan drop ke dalam iterasi jarak tempuh busur, (predicted - origin).Magnitude == speed * t,
 -- sehingga saat peluru sampai di t, posisi peluru tepat 100% di titik target.
 local function aim_solve_point(origin, target_pos, target_vel, ballistics, include_jitter)
+    if ballistics.valid == false then return target_pos, 0 end
     local speed = ballistics.velocity
     local gravity = State.aim.gravity_comp and ballistics.gravity or 0
     local t_vel = target_vel or Vector3.zero
@@ -1723,42 +1726,41 @@ end
 
 local function aim_pick_vital(model, origin, require_vis)
     local order = AIM_BONES[State.aim.bone] or AIM_BONES.vital
+    local strict = State.aim.bone ~= "vital"
+    local allowed = {}
+    for _, name in ipairs(order) do allowed[name] = true end
     local rig = aim_rig(model)
-    local best_any, best_score, best_vis, vis_score = nil, math.huge, nil, math.huge
+    local best, score = nil, math.huge
+    local function consider(part, rank)
+        if not part.Parent or AIM_BONE_NOISE[part.Name] or (strict and not allowed[part.Name]) then return nil end
+        local distance = (part.Position - origin).Magnitude + (rank or 0) * 1.5
+        if distance < score then best, score = part, distance end
+        if require_vis and (State.aim.rays_left or 16) > 0 and aim_visible(origin, part, model) then return part end
+        return nil
+    end
     for rank, name in ipairs(order) do
         for _, part in ipairs(rig.named[name] or {}) do
-            if part.Parent then
-                local score = (part.Position - origin).Magnitude + rank * 1.5
-                if score < best_score then best_any, best_score = part, score end
-                if require_vis and score < vis_score and aim_visible(origin, part, model) then
-                    return part, true
-                end
-            end
+            local visible = consider(part, rank)
+            if visible then return visible, true end
         end
     end
-    if best_vis then return best_vis, true end
-    if require_vis and State.aim.wall_fallback then
+    -- Only Vital may cross groups; explicit Head/Body/Legs never silently changes region.
+    if not strict and require_vis and State.aim.wall_fallback then
         for _, part in ipairs(rig.direct) do
             if (State.aim.rays_left or 16) <= 0 then break end
-            if part.Parent then
-                local score = (part.Position - origin).Magnitude
-                if score < vis_score and aim_visible(origin, part, model) then return part, true end
-            end
-        end
-        if best_vis then return best_vis, true end
-    end
-    if best_any then return best_any, false end
-    if not rig.descendants then
-        rig.descendants = model:QueryDescendants("BasePart")
-    end
-    for _, part in ipairs(rig.descendants) do
-        if part.Parent and not AIM_BONE_NOISE[part.Name] then
-            local score = (part.Position - origin).Magnitude
-            if score < best_score then best_any, best_score = part, score end
+            local visible = consider(part)
+            if visible then return visible, true end
         end
     end
-    local fallback = best_any or model.PrimaryPart
-    return fallback, require_vis and fallback ~= nil and aim_visible(origin, fallback, model) or false
+    if not best then
+        if not rig.descendants then rig.descendants = model:QueryDescendants("BasePart") end
+        for _, part in ipairs(rig.descendants) do
+            local visible = consider(part)
+            if visible then return visible, true end
+        end
+    end
+    if require_vis then return nil, false end
+    return best, false
 end
 
 local function aim_target_kind(model)
@@ -1855,7 +1857,7 @@ local function evaluate_single_model(model, kind, origin, fwd, cam, ref_screen, 
 
     local delta = part.Position - origin
     local dist = delta.Magnitude
-    local limit = State.aim.max_distance
+    local limit = State.aim.effective_range or State.aim.max_distance
     if dist < 1 or dist > limit then return nil end
 
     local unit = delta / dist
@@ -1902,6 +1904,10 @@ local function aim_scan_target()
     local max_radius_px = get_fov_radius_px(cam)
     local half_fov_cos = math.cos(math.rad(State.aim.fov * 0.5))
 
+    local weapon = aim_ballistics()
+    State.aim.weapon_slot = weapon.slot
+    State.aim.weapon_range = weapon.valid and weapon.known_range or nil
+    State.aim.effective_range = math.min(State.aim.max_distance, State.aim.weapon_range or State.aim.max_distance)
     State.aim.rays_left = 16
     local pool = {}
     local previous = State.aim.target_cache or State.aim.locked
@@ -2035,6 +2041,9 @@ function restore_aim()
     State.aim.locked = nil
     State.aim.locked_model = nil
     State.aim.hold_off = 0
+    State.aim.status_text = "Aim: OFF"
+    local label = State.aim.status_label
+    if label and type(label.SetText) == "function" then pcall(label.SetText, label, State.aim.status_text) end
     if aim_conn then
         pcall(function() aim_conn:Disconnect() end)
         aim_conn = nil
@@ -2090,6 +2099,11 @@ local function apply_aim(enabled)
             if not is_trigger_active() then
                 State.aim.target_cache = nil
                 State.aim.roster_at, State.aim.roster_cursor = 0, 1
+                if State.aim.status_text ~= "Hold RIGHT MOUSE" then
+                    State.aim.status_text = "Hold RIGHT MOUSE"
+                    local label = State.aim.status_label
+                    if label and type(label.SetText) == "function" then pcall(label.SetText, label, State.aim.status_text) end
+                end
                 task.wait(0.05)
                 continue
             end
@@ -2099,6 +2113,10 @@ local function apply_aim(enabled)
                 State.aim.scan_failures = 0
                 State.aim.target_cache = target
                 State.aim.target_cache_at = os.clock()
+                State.aim.status_text = target and string.format("Lock: %s · %s · %.0f st", target.model.Name, target.part.Name, target.dist)
+                    or string.format("No target · %s · %s / %.0f st", State.aim.bone, State.aim.weapon_slot or "none", State.aim.effective_range or State.aim.max_distance)
+                local label = State.aim.status_label
+                if label and type(label.SetText) == "function" then pcall(label.SetText, label, State.aim.status_text) end
             else
                 State.aim.target_cache = nil
                 State.aim.scan_failures = (State.aim.scan_failures or 0) + 1
@@ -2271,10 +2289,12 @@ local function init_combat_tab(tab)
     })
     panel:AddLabel("FOV + lock + visibility + lead: included.")
     panel:AddDropdown("HushAimBone", {
-        Text = "Hitbox", Values = { "Vital", "Kepala", "Badan", "Kaki" }, Default = "Vital",
+        Text = "Hitbox", Values = { "Vital", "Kepala", "Badan", "Kaki" }, Default = "Badan",
         Callback = function(v)
             local map = { ["Vital"] = "vital", ["Kepala"] = "head", ["Badan"] = "body", ["Kaki"] = "legs" }
             State.aim.bone = map[v] or "vital"
+            State.aim.target_cache, State.aim.locked, State.aim.locked_model = nil, nil, nil
+            State.aim.roster_at, State.aim.roster_cursor = 0, 1
         end,
     })
     panel:AddDropdown("HushAimKind", {
@@ -2294,6 +2314,9 @@ local function init_combat_tab(tab)
         Text = "Distance", Default = 1000, Min = 50, Max = 1000, Rounding = 0, Suffix = " st",
         Callback = function(v) State.aim.max_distance = v end,
     })
+    State.aim.status_label = settings:AddLabel("Aim: OFF · hold RMB when enabled")
+    settings:AddLabel("Body/Head/Legs stay in the chosen group.")
+    settings:AddLabel("Effective range follows the equipped weapon.")
     settings:AddLabel("Camera-only compatibility build.")
     settings:AddLabel("Silent Aim is unavailable: first-shot crash unresolved.")
 end

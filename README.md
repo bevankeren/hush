@@ -206,3 +206,21 @@ bukan auto-start: fresh execute tetap semua toggle OFF. Camera-only tetap berlak
   dan aim OFF setelah3 error berturut-turut. Library UI di-unload dengan benar;
   callback Hush keypicker lama dikarantina secara spesifik saat boot. Bukan jaminan
   tidak pernah ada error/native crash; tidak ada tembakan otomatis dalam tes ini.
+
+
+### Hitbox dan batas senjata
+
+Default hitbox kini **Badan**. Badan berarti torso/chest/abdomen/root, tidak Neck,
+Head, atau fallback kepala. Kepala/Kaki juga tidak pindah kelompok; hanya Vital
+bersifat fleksibel. Bila kelompok pilihan tertutup/tidak ada, tidak ada lock.
+Mengubah hitbox langsung membersihkan cache/lock lama.
+
+Range efektif = minimum slider aim dan range senjata yang benar-benar dipegang.
+Definisi game yang diperiksa: pistol320 stud, machine_pistol220 stud. Tidak ada
+prediksi drop/lead dengan metadata senjata yang tidak diketahui; unequipped inventory
+tidak dianggap senjata di tangan. Status Aim Settings menampilkan part/range.
+
+Kamera dapat mengarah di atas badan sebagai kompensasi drop pada jarak jauh;
+itu berbeda dari memilih Head. Ini camera aim: spread/recoil asli, gerak jaringan,
+perlindungan target dan validasi server tetap berlaku. Tidak ada klaim6 peluru
+berikutnya pasti kena, dan tidak ada tes tembakan otomatis pada revisi ini.

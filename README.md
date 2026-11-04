@@ -82,3 +82,11 @@ tersebut: creature, player, container, ground loot/bag, atau trap. Outline menem
 dinding tanpa fill solid, mengikuti jarak/filter ESP, dan independen dari label.
 ESP kategori OFF juga membersihkan outline-nya. Super Potato mematikan kelima
 outline sementara; ketika preset OFF, pilihan sebelumnya dikembalikan.
+
+
+### Perbaikan equip saat Aimbot aktif
+
+Hook senjata v2 meneruskan paket lewat native `FireServer`, sehingga pengecekan
+input/raycast di dalam hook tidak mengubah metode equip/reload. Hanya aksi `Fire`
+yang boleh dipatch; jumlah argumen dan trailing nil dipertahankan. Dispatch state
+selalu diperbarui saat re-execute tanpa memasang wrapper v2 berulang.

@@ -201,6 +201,8 @@ local function teardown()
     if getgenv().__HushNamecallState == State then
         getgenv().__HushNamecallState = nil
     end
+    local runtime = getgenv().__HushNamecallRuntime
+    if runtime and runtime.state == State then runtime.state = nil end
     pcall(restore_all_perf)
     pcall(restore_visuals)
     pcall(restore_movement)
@@ -2005,58 +2007,58 @@ end
 
 local function ensure_unified_namecall_hook()
     getgenv().__HushNamecallState = State
+    -- Refresh dispatch on re-execution; the installed wrapper must not retain old State closures.
+    getgenv().__HushNamecallRuntime = {
+        state = State, log = aim_log_gun_args, trigger = is_trigger_active,
+        target = aim_get_current_target, origin = get_muzzle_origin,
+        ballistics = aim_ballistics, solve = aim_solve_point,
+        look = send_look_remote, patch = aim_patch_args,
+    }
     ensure_client_guns_hook()
-    if getgenv().__HushNamecallHooked then
-        return
-    end
-    if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then
-        return
-    end
+    if getgenv().__HushNamecallVersion == 2 then return end
+    if type(getnamecallmethod) ~= "function" then return end
 
+    local prototype = Instance.new("RemoteEvent")
+    local native_fire_server = prototype.FireServer
+    prototype:Destroy()
     local raw_meta = getrawmetatable(game)
-    setreadonly(raw_meta, false)
     local old_namecall = raw_meta.__namecall
-
+    setreadonly(raw_meta, false)
     raw_meta.__namecall = newcclosure(function(self, ...)
-        local active_state = getgenv().__HushNamecallState
-        if active_state and typeof(self) == "Instance" then
-            local method = getnamecallmethod()
-            if method == "FireServer" or method == "fireServer" then
-                local name = self.Name
-                if name == "Voice" and active_state.silencer and active_state.silencer.enabled then
-                    return nil
-                elseif name == "Gun" and active_state.aim then
-                    local args = { ... }
-                    aim_log_gun_args(active_state, args)
-
-                    if active_state.aim.no_spread and args[1] == "Fire" and type(args[3]) == "number" then
-                        args[3] = 0
-                    end
-
-                    if active_state.aim.enabled and (active_state.aim.mode == "silent" or is_trigger_active()) then
-                        local target = active_state.aim.locked or aim_get_current_target()
-                        if target and target.part then
-                            local muzzle_origin = (typeof(args[5]) == "Vector3") and args[5] or get_muzzle_origin()
-                            local ballistics = aim_ballistics()
-                            local hit_pos = aim_solve_point(
-                                muzzle_origin, target.part.Position, target.part.AssemblyLinearVelocity, ballistics, true
-                            )
-                            if active_state.aim.mode == "silent" and active_state.aim.silent_look_sync then
-                                send_look_remote(muzzle_origin, hit_pos)
-                            end
-                            aim_patch_args(active_state, args, muzzle_origin, hit_pos)
-                            active_state.aim.stats.fired = (active_state.aim.stats.fired or 0) + 1
+        local method = getnamecallmethod()
+        if (method == "FireServer" or method == "fireServer") and typeof(self) == "Instance" then
+            local name = self.Name
+            local runtime = getgenv().__HushNamecallRuntime
+            local active = runtime and runtime.state
+            if name == "Voice" and active and active.silencer.enabled then return nil end
+            if name == "Gun" and self:IsA("RemoteEvent") then
+                local args = table.pack(...)
+                -- Equip, reload, aiming and all non-shot packets remain byte-for-byte arguments.
+                if active and args[1] == "Fire" then
+                    runtime.log(active, args)
+                    if active.aim.no_spread and type(args[3]) == "number" then args[3] = 0 end
+                    if active.aim.enabled and (active.aim.mode == "silent" or runtime.trigger()) then
+                        local target = active.aim.locked or runtime.target()
+                        if target and target.part and target.part.Parent then
+                            local origin = typeof(args[5]) == "Vector3" and args[5] or runtime.origin()
+                            local hit = runtime.solve(origin, target.part.Position, target.part.AssemblyLinearVelocity,
+                                runtime.ballistics(), true)
+                            if active.aim.mode == "silent" and active.aim.silent_look_sync then runtime.look(origin, hit) end
+                            runtime.patch(active, args, origin, hit)
+                            active.aim.stats.fired = (active.aim.stats.fired or 0) + 1
                         end
                     end
-                    return old_namecall(self, unpack(args))
                 end
+                -- Direct native dispatch does not depend on the mutable namecall method slot.
+                return native_fire_server(self, table.unpack(args, 1, args.n))
             end
         end
+        -- No nested namecall work is done on this forwarding path.
         return old_namecall(self, ...)
     end)
-
     setreadonly(raw_meta, true)
     getgenv().__HushNamecallHooked = true
+    getgenv().__HushNamecallVersion = 2
 end
 
 function restore_aim()
@@ -2147,6 +2149,13 @@ local function apply_aim(enabled)
         if State.aim.no_recoil and type(State.aim.u11_fn) == "function" and type(debug) == "table" and type(debug.setupvalue) == "function" then
             local u11 = State.aim.u11_fn
             pcall(function()
+                for index = 28, 32 do
+                    if type(debug.getupvalue(u11, index)) ~= "number" then
+                        State.aim.no_recoil = false
+                        warn("[hush] No Recoil stopped: incompatible gun state layout")
+                        return
+                    end
+                end
                 debug.setupvalue(u11, 28, 0) -- heat
                 debug.setupvalue(u11, 29, 0) -- recoil climb
                 debug.setupvalue(u11, 30, 0) -- recoil climb target

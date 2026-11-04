@@ -125,3 +125,18 @@ Fresh execute: 31 toggle OFF. Saat camera aim ON, pointer `__namecall`, fungsi
 load. Compile Luau dan tes guard sesi lama lulus. Tidak ada tembakan otomatis
 atau klaim native crash telah terselesaikan. ESP, outline per kategori dan Potato
 tetap tersedia. Riwayat penjelasan hook v2 di atas bukan fitur aktif build ini.
+
+
+### Player LOS dan keybind aktivasi
+
+Player ESP mewarnai nama, accent dan outline hijau bila ray kamera ke head/root
+terbuka; kuning bila terhalang atau belum diperiksa. Maksimal 8 rays per pass ESP,
+cache 0,4 detik dengan traversal round-robin. Saat budget habis, hasil terakhir
+bisa dipakai hingga 2 detik; tanpa hasil valid, tampil kuning. Ini LOS raycast,
+bukan pengukuran photometric; perubahan warna bisa terlambat pada server ramai.
+
+Dropdown Activation Key dihapus. Kotak keybind di samping Enable Aimbot bisa
+diklik untuk mengganti tombol; klik kanan memilih Hold / Toggle. Default MB2 Hold
+(tahan klik kanan). Keybind menyinkronkan checkbox master, bukan tombol kedua yang
+harus diaktifkan terpisah. Aim berhenti bergerak saat mengetik di text box. Fresh
+execution tetap OFF. Tetap camera-only, tanpa native weapon hooks.

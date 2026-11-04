@@ -76,6 +76,8 @@ local State = {
         prompt_meta = {},
         nearby_prompts = {},
         prompt_holds = {},
+        player_los_cache = setmetatable({}, { __mode = "k" }),
+        player_los_cursor = 1,
         prompt_cache_started = false,
         index_ready = false,
         container_items = {},    -- [Instance] = "RPK · Heavy Ammo x30"
@@ -122,7 +124,7 @@ local State = {
         fov_circle_color = Color3.fromRGB(255, 80, 80),
         fov_circle_locked_color = Color3.fromRGB(80, 255, 140),
         fov_circle_transparency = 0.75,
-        trigger = "rmb",          -- "rmb" | "always" | "lmb"
+        activation_picker = nil,
         smooth = 35,
         max_distance = 600,
         bone = "vital",           -- "vital" | "head" | "body" | "legs"
@@ -617,7 +619,7 @@ local function esp_escape(text)
     return tostring(text):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
 end
 
-local function render_esp_billboard(key, target_part, primary_text, secondary_text, accent_color, offset_y, is_compact, seen_tags)
+local function render_esp_billboard(key, target_part, primary_text, secondary_text, accent_color, offset_y, is_compact, seen_tags, category)
     seen_tags[key] = true
     local entry = State.esp.cache_tags[key]
     if not entry or not entry.bbg or not entry.bbg.Parent then
@@ -671,6 +673,7 @@ local function render_esp_billboard(key, target_part, primary_text, secondary_te
     entry.bbg.Adornee = target_part
     entry.bbg.StudsOffsetWorldSpace = Vector3.new(0, offset_y or 3.2, 0)
     entry.mark.BackgroundColor3 = accent_color or Color3.fromRGB(180, 190, 200)
+    entry.l1.TextColor3 = category == "players" and accent_color or Color3.fromRGB(237, 239, 241)
     entry.compact = is_compact
     local now = os.clock()
     if now < (entry.next_text or 0) then return end
@@ -711,12 +714,12 @@ local function render_highlight(key, model, fill_color, outline_color, fill_tran
     entry.hl.OutlineTransparency = 0.25
 end
 
-local function upsert_esp_billboard(key, part, text, detail, color, offset, compact, seen)
+local function upsert_esp_billboard(key, part, text, detail, color, offset, compact, seen, category)
     local cam = workspace.CurrentCamera
     if not cam then return end
     local screen, visible = cam:WorldToViewportPoint(part.Position + Vector3.new(0, offset or 3.2, 0))
     if not visible or screen.Z <= 0 then return end
-    local args = { key, part, text, detail, color, offset, compact, seen }
+    local args = { key, part, text, detail, color, offset, compact, seen, category }
     table.insert(State.esp.pending_tags, { args = args, distance = (part.Position - State.esp.cycle_origin).Magnitude,
         locked = key == State.aim.locked_model })
 end
@@ -739,7 +742,7 @@ local function flush_esp_requests()
     local slice = os.clock()
     for i, request in ipairs(State.esp.pending_tags) do
         if i > (State.perf.potato and 20 or State.esp.render_limit) then break end
-        render_esp_billboard(table.unpack(request.args, 1, 8))
+        render_esp_billboard(table.unpack(request.args, 1, 9))
         if os.clock() - slice > 0.0015 then RunService.Heartbeat:Wait(); slice = os.clock() end
     end
     for i, request in ipairs(State.esp.pending_outlines) do
@@ -1034,6 +1037,38 @@ local function set_instant_prompt(enabled)
     for _, prompt in ipairs(State.esp.cached_prompts) do if prompt.Parent then apply_prompt_hold(prompt) end end
 end
 
+-- Separate from aim visibility: camera line-of-sight, cached and ray-budgeted.
+local player_los_params = RaycastParams.new()
+player_los_params.FilterType = Enum.RaycastFilterType.Exclude
+player_los_params.IgnoreWater = true
+local function player_is_visible(character, root)
+    local cam = workspace.CurrentCamera
+    if not cam then return false end
+    local cache = State.esp.player_los_cache
+    local now = os.clock()
+    local old = cache[character]
+    if old and now - old.at < 0.4 then return old.visible end
+    if (State.esp.player_los_rays or 0) <= 0 then
+        return old ~= nil and now - old.at < 2 and old.visible or false
+    end
+    local excluded = { cam }
+    local lp = Players.LocalPlayer
+    if lp and lp.Character then table.insert(excluded, lp.Character) end
+    if State.esp.folder then table.insert(excluded, State.esp.folder) end
+    player_los_params.FilterDescendantsInstances = excluded
+    local origin = cam.CFrame.Position
+    local head = character:FindFirstChild("Head")
+    local visible = false
+    for _, target in ipairs(head and { head, root } or { root }) do
+        if State.esp.player_los_rays <= 0 then break end
+        State.esp.player_los_rays -= 1
+        local hit = workspace:Raycast(origin, target.Position - origin, player_los_params)
+        if not hit or hit.Instance:IsDescendantOf(character) then visible = true; break end
+    end
+    cache[character] = { at = now, visible = visible }
+    return visible
+end
+
 local function run_esp_cycle()
     if not State.esp.enabled or not (State.esp.monsters or State.esp.players or State.esp.loot
         or State.esp.containers or State.esp.traps) then
@@ -1041,6 +1076,7 @@ local function run_esp_cycle()
         return
     end
 
+    State.esp.player_los_rays = 8
     local my_pos = get_origin_pos()
     State.esp.cycle_origin = my_pos
     State.esp.pending_tags, State.esp.pending_outlines = {}, {}
@@ -1243,7 +1279,10 @@ local function run_esp_cycle()
     -- Players
     if State.esp.players then
         local local_player = Players.LocalPlayer
-        for _, p in ipairs(Players:GetPlayers()) do
+        local players = Players:GetPlayers()
+        local cursor = State.esp.player_los_cursor
+        for i = 1, #players do
+            local p = players[(cursor + i - 2) % #players + 1]
             esp_yield()
             if p ~= local_player and p.Character then
                 local ochar = p.Character
@@ -1253,22 +1292,24 @@ local function run_esp_cycle()
                     local dist = (oroot.Position - my_pos).Magnitude
                     if dist <= State.esp.max_player_dist then
                         local hp_num = ohum and ohum.Health or 100
-                        local p_color = Color3.fromRGB(85, 225, 145)
+                        local visible = player_is_visible(ochar, oroot)
+                        local p_color = visible and Color3.fromRGB(85, 225, 145) or Color3.fromRGB(255, 205, 65)
                         upsert_highlight(ochar, ochar, p_color, p_color, 1, seen_hl, "players")
                         upsert_esp_billboard(
                             ochar,
                             oroot,
                             string.format("%s  <font color='#a8afb9'>%.0f st</font>", esp_escape(p.DisplayName), dist),
-                            string.format("%.0f HP", hp_num),
+                            string.format("%.0f HP · %s", hp_num, visible and "Visible" or "Occluded / unchecked"),
                             p_color,
                             3.6,
                             false,
-                            seen_tags
+                            seen_tags, "players"
                         )
                     end
                 end
             end
         end
+        State.esp.player_los_cursor = cursor + 4
     end
 
     flush_esp_requests()
@@ -1924,9 +1965,7 @@ local function aim_victim_count()
 end
 
 local function is_trigger_active()
-    if State.aim.trigger == "rmb" then return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) end
-    if State.aim.trigger == "lmb" then return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) end
-    return State.aim.trigger == "always"
+    return State.aim.enabled and UserInputService:GetFocusedTextBox() == nil
 end
 
 local function apply_aim(enabled)
@@ -2102,7 +2141,7 @@ local function init_combat_tab(tab)
         IconName = "crosshair",
     })
 
-    panel:AddToggle("HushAimToggle", {
+    local aim_toggle = panel:AddToggle("HushAimToggle", {
         Text = "Enable Aimbot",
         Default = false,
         Tooltip = "Aktifkan penguncian target di dalam radius FOV.",
@@ -2150,17 +2189,12 @@ local function init_combat_tab(tab)
         end,
     })
 
-    panel:AddDropdown("HushAimTrigger", {
-        Text = "Activation Key",
-        Values = { "Klik Kanan", "Klik Kiri", "Selalu" },
-        Default = "Klik Kanan",
-        Callback = function(v)
-            local map = {
-                ["Klik Kanan"] = "rmb", ["Klik Kiri"] = "lmb", ["Selalu"] = "always",
-            }
-            State.aim.trigger = map[v] or "rmb"
-        end,
+    State.aim.activation_picker = aim_toggle:AddKeyPicker("HushAimKeybind", {
+        Default = "MB2", Mode = "Hold", Modes = { "Hold", "Toggle" },
+        SyncToggleState = true, Text = "Aimbot activation",
     })
+    panel:AddLabel("Click key box to rebind; right-click for Hold / Toggle.")
+
 
     panel:AddDropdown("HushAimFovOrigin", {
         Text = "FOV Center",
@@ -2373,7 +2407,7 @@ local function init_visuals_tab(tab)
     panel_ent:AddToggle("HushPlayerESP", {
         Text = "Raider / Player ESP",
         Default = false,
-        Tooltip = "Tampilkan pemain lain beserta indikator HP dan jarak.",
+        Tooltip = "Player LOS: green when head/root is clear, yellow when blocked or not yet checked. Bounded cached checks; outline uses the same color.",
         Callback = function(v) State.esp.players = v end,
     })
 

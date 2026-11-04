@@ -32,6 +32,8 @@ local State = {
         outline_loot = false,
         outline_traps = false,
         label_budget = 24,
+        render_limit = 48,
+        outline_limit = 24,
         detail_distance = 120,
         visible_labels = 0,
         screen_candidates = 0,
@@ -90,6 +92,7 @@ local State = {
         disabled_particles = {},
         groups = {},
         generations = {},
+        jobs = {},
         potato = false,
         flat = false,
         saved_preset = nil,
@@ -350,6 +353,8 @@ local function perf_set(group, object, prop, value)
 end
 
 local function restore_perf_group(group)
+    local job = State.perf.jobs[group]
+    if job then pcall(task.cancel, job); State.perf.jobs[group] = nil end
     State.perf.generations[group] = (State.perf.generations[group] or 0) + 1
     for object, props in pairs(State.perf.groups[group] or {}) do
         if object.Parent then
@@ -362,6 +367,8 @@ local function restore_perf_group(group)
 end
 
 local function perf_scan(group, root, selector, apply)
+    local previous = State.perf.jobs[group]
+    if previous then pcall(task.cancel, previous) end
     local gen = (State.perf.generations[group] or 0) + 1
     State.perf.generations[group] = gen
     local thread = task.spawn(function()
@@ -377,7 +384,7 @@ local function perf_scan(group, root, selector, apply)
             end
         end
     end)
-    table.insert(State.threads, thread)
+    State.perf.jobs[group] = thread
 end
 
 local function is_particle(object)
@@ -497,7 +504,7 @@ set_potato = function(enabled)
         for _, id in ipairs(ids) do saved.toggles[id] = lib.Toggles[id].Value end
         State.perf.saved_preset = saved
         State.perf.potato = true
-        for _, id in ipairs(ids) do lib.Toggles[id]:SetValue(true) end
+        for _, id in ipairs(ids) do lib.Toggles[id]:SetValue(id ~= "HushFlatWorld") end
         lib.Options.HushESPBudget:SetValue(12)
         lib.Options.HushESPDetailDistance:SetValue(70)
         for _, id in ipairs({ "HushMonsterOutline", "HushPlayerOutline", "HushContainerOutline", "HushLootOutline", "HushTrapOutline" }) do
@@ -594,7 +601,7 @@ local function esp_escape(text)
     return tostring(text):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
 end
 
-local function upsert_esp_billboard(key, target_part, primary_text, secondary_text, accent_color, offset_y, is_compact, seen_tags)
+local function render_esp_billboard(key, target_part, primary_text, secondary_text, accent_color, offset_y, is_compact, seen_tags)
     seen_tags[key] = true
     local entry = State.esp.cache_tags[key]
     if not entry or not entry.bbg or not entry.bbg.Parent then
@@ -668,7 +675,7 @@ local function set_outline(category, enabled)
     end
 end
 
-local function upsert_highlight(key, model, fill_color, outline_color, fill_trans, seen_hl, category)
+local function render_highlight(key, model, fill_color, outline_color, fill_trans, seen_hl, category)
     if not State.esp["outline_" .. category] then return end
     if not model:IsA("Model") and not model:IsA("BasePart") then return end
     seen_hl[key] = true
@@ -686,6 +693,46 @@ local function upsert_highlight(key, model, fill_color, outline_color, fill_tran
     entry.hl.OutlineColor = outline_color or entry.hl.FillColor
     entry.hl.FillTransparency = 1
     entry.hl.OutlineTransparency = 0.25
+end
+
+local function upsert_esp_billboard(key, part, text, detail, color, offset, compact, seen)
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    local screen, visible = cam:WorldToViewportPoint(part.Position + Vector3.new(0, offset or 3.2, 0))
+    if not visible or screen.Z <= 0 then return end
+    local args = { key, part, text, detail, color, offset, compact, seen }
+    table.insert(State.esp.pending_tags, { args = args, distance = (part.Position - State.esp.cycle_origin).Magnitude,
+        locked = key == State.aim.locked_model })
+end
+
+local function upsert_highlight(key, model, fill, outline, alpha, seen, category)
+    if not State.esp["outline_" .. category] then return end
+    local part = model:IsA("BasePart") and model or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
+    if not part then return end
+    table.insert(State.esp.pending_outlines, { args = { key, model, fill, outline, alpha, seen, category },
+        distance = (part.Position - State.esp.cycle_origin).Magnitude, locked = key == State.aim.locked_model })
+end
+
+local function flush_esp_requests()
+    local function nearer(a, b)
+        if a.locked ~= b.locked then return a.locked end
+        return a.distance < b.distance
+    end
+    table.sort(State.esp.pending_tags, nearer)
+    table.sort(State.esp.pending_outlines, nearer)
+    local slice = os.clock()
+    for i, request in ipairs(State.esp.pending_tags) do
+        if i > (State.perf.potato and 20 or State.esp.render_limit) then break end
+        render_esp_billboard(table.unpack(request.args, 1, 8))
+        if os.clock() - slice > 0.0015 then RunService.Heartbeat:Wait(); slice = os.clock() end
+    end
+    for i, request in ipairs(State.esp.pending_outlines) do
+        if i > (State.perf.potato and 12 or State.esp.outline_limit) then break end
+        render_highlight(table.unpack(request.args, 1, 7))
+        if os.clock() - slice > 0.0015 then RunService.Heartbeat:Wait(); slice = os.clock() end
+    end
+    table.clear(State.esp.pending_tags)
+    table.clear(State.esp.pending_outlines)
 end
 
 -- Layout runs on the ESP tick, never every render frame.
@@ -979,6 +1026,12 @@ local function run_esp_cycle()
     end
 
     local my_pos = get_origin_pos()
+    State.esp.cycle_origin = my_pos
+    State.esp.pending_tags, State.esp.pending_outlines = {}, {}
+    local slice = os.clock()
+    local function esp_yield()
+        if os.clock() - slice > 0.0015 then RunService.Heartbeat:Wait(); slice = os.clock() end
+    end
     local seen_tags = {}
     local seen_hl = {}
 
@@ -1030,11 +1083,13 @@ local function run_esp_cycle()
 
         if mf then
             for _, m in ipairs(mf:GetChildren()) do
+            esp_yield()
                 process_monster(m, "Monster")
             end
         end
         if wf then
             for _, w in ipairs(wf:GetChildren()) do
+            esp_yield()
                 process_monster(w, "Watcher")
             end
         end
@@ -1052,6 +1107,7 @@ local function run_esp_cycle()
         for _, group in ipairs(loot_containers) do
             if group.folder then
                 for _, item in ipairs(group.folder:GetChildren()) do
+            esp_yield()
                     local ppart = item:IsA("BasePart") and item or item.PrimaryPart or item:FindFirstChildWhichIsA("BasePart", true)
                     if ppart then
                         local dist = (ppart.Position - my_pos).Magnitude
@@ -1094,6 +1150,7 @@ local function run_esp_cycle()
     if State.esp.containers then
         local prompts = refresh_search_prompts_cache()
         for _, prompt in ipairs(prompts) do
+            esp_yield()
             if prompt and prompt.Parent and prompt.Enabled then
                 local container = prompt.Parent
                 if not State.esp.container_empty[container] then
@@ -1145,6 +1202,7 @@ local function run_esp_cycle()
         local tf = workspace:FindFirstChild("NoiseTraps")
         if tf then
             for _, trap in ipairs(tf:GetChildren()) do
+            esp_yield()
                 if trap:IsA("BasePart") then
                     local dist = (trap.Position - my_pos).Magnitude
                     if dist <= State.esp.max_trap_dist then
@@ -1170,6 +1228,7 @@ local function run_esp_cycle()
     if State.esp.players then
         local local_player = Players.LocalPlayer
         for _, p in ipairs(Players:GetPlayers()) do
+            esp_yield()
             if p ~= local_player and p.Character then
                 local ochar = p.Character
                 local oroot = ochar:FindFirstChild("HumanoidRootPart")
@@ -1195,6 +1254,8 @@ local function run_esp_cycle()
             end
         end
     end
+
+    flush_esp_requests()
 
     -- Release entries that left range or were removed.
     for key, entry in pairs(State.esp.cache_tags) do
@@ -1429,8 +1490,11 @@ local function aim_visible(origin, target_part, target_model)
     local cur_origin = origin
     local goal_pos = target_part.Position
 
+    -- Bound expensive ray work across the entire discovery pass.
     -- Tembus hingga 6 lapis kaca atau part transparan (>=0.9) sesuai Shared.Ballistics.walk
     for _ = 1, 6 do
+        if (State.aim.rays_left or 16) <= 0 then return false end
+        State.aim.rays_left = (State.aim.rays_left or 16) - 1
         aim_ray_params.FilterDescendantsInstances = exclude
         local dir = goal_pos - cur_origin
         if dir.Magnitude < 0.3 then return true end
@@ -1472,16 +1536,20 @@ end
 -- agar rasio Bayesian CheatFlags (LrHead=1.15 * LrBody=0.90 * LrBody=0.90 = 0.9315 < 1.0)
 -- selalu menurunkan skor kecurigaan server alih-alih naik ke AimKickAt (0.90).
 local aim_rig_cache = setmetatable({}, { __mode = "k" })
-local aim_rig_watchers = setmetatable({}, { __mode = "k" })
+local aim_cache_events_started = false
 local function aim_rig(model)
     local now = os.clock()
     local rig = aim_rig_cache[model]
     if rig and now < rig.expires and (not rig.root or rig.root.Parent) then return rig end
-    if not aim_rig_watchers[model] then
-        aim_rig_watchers[model] = true
-        local function invalidate() aim_rig_cache[model] = nil end
-        table.insert(State.connections, model.ChildAdded:Connect(invalidate))
-        table.insert(State.connections, model.ChildRemoved:Connect(invalidate))
+    if not aim_cache_events_started then
+        aim_cache_events_started = true
+        local function changed(object)
+            if object:IsA("Model") then aim_rig_cache[object] = nil; return end
+            local parent = object.Parent
+            if parent and aim_rig_cache[parent] and object:IsA("BasePart") then aim_rig_cache[parent] = nil end
+        end
+        table.insert(State.connections, workspace.DescendantAdded:Connect(changed))
+        table.insert(State.connections, workspace.DescendantRemoving:Connect(changed))
     end
     local named, direct = {}, {}
     for _, part in ipairs(model:GetChildren()) do
@@ -1493,12 +1561,7 @@ local function aim_rig(model)
         end
     end
     local root = model.PrimaryPart or named.HumanoidRootPart and named.HumanoidRootPart[1] or direct[1]
-    local radius = 64
-    if root then
-        local ok, cf, size = pcall(function() return model:GetBoundingBox() end)
-        if ok then radius = (root.Position - cf.Position).Magnitude + size.Magnitude * 0.5 + 8 end
-    end
-    rig = { named = named, direct = direct, root = root, radius = radius, expires = now + 30 }
+    rig = { named = named, direct = direct, root = root, expires = now + 30 }
     aim_rig_cache[model] = rig
     return rig
 end
@@ -1525,6 +1588,7 @@ local function aim_pick_vital(model, origin, require_vis)
     if best_vis then return best_vis, true end
     if require_vis and State.aim.wall_fallback then
         for _, part in ipairs(rig.direct) do
+            if (State.aim.rays_left or 16) <= 0 then break end
             if part.Parent then
                 local score = (part.Position - origin).Magnitude
                 if score < vis_score and aim_visible(origin, part, model) then best_vis, vis_score = part, score end
@@ -1592,6 +1656,8 @@ local function update_fov_circle()
         if fov_circle then fov_circle.Visible = false end
         return
     end
+    if os.clock() < (State.aim.next_circle or 0) then return end
+    State.aim.next_circle = os.clock() + 1 / 30
     local circle = ensure_fov_circle()
     if not circle then return end
 
@@ -1632,17 +1698,6 @@ local function evaluate_single_model(model, kind, origin, fwd, cam, ref_screen, 
     if not is_model_alive(model) then return nil end
     if not aim_kind_allowed(kind) then return nil end
 
-    local rig = aim_rig(model)
-    if rig.root and rig.root.Parent then
-        local delta = rig.root.Position - origin
-        local distance = delta.Magnitude
-        if distance - rig.radius > State.aim.max_distance then return nil end
-        if distance > rig.radius and State.aim.fov < 180 then
-            local half = math.rad(State.aim.fov * (is_sticky_check and 0.575 or 0.5))
-            local margin = math.asin(math.clamp(rig.radius / distance, 0, 1))
-            if fwd:Dot(delta / distance) < math.cos(math.min(math.pi, half + margin)) then return nil end
-        end
-    end
     local part, is_vis = aim_pick_vital(model, origin, State.aim.visible_only)
     if not part then return nil end
     if State.aim.visible_only and not is_vis then return nil end
@@ -1696,60 +1751,50 @@ local function aim_scan_target()
     local max_radius_px = get_fov_radius_px(cam)
     local half_fov_cos = math.cos(math.rad(State.aim.fov * 0.5))
 
-    -- 1. Sticky Target Lock: pertahankan target yang sedang dikunci jika masih valid & hidup
-    if State.aim.sticky_lock and State.aim.locked and State.aim.locked.model then
-        local locked_model = State.aim.locked.model
-        local locked_kind = aim_target_kind(locked_model)
-        local kept = evaluate_single_model(
-            locked_model, locked_kind, origin, fwd, cam, ref_screen, max_radius_px, half_fov_cos, true
-        )
-        if kept then
-            return kept
-        end
-    end
-
+    State.aim.rays_left = 16
     local pool = {}
-    local slice = os.clock()
-    local function budget_yield()
-        if os.clock() - slice > 0.002 then
-            RunService.Heartbeat:Wait()
-            slice = os.clock()
+    local previous = State.aim.target_cache or State.aim.locked
+    if previous and previous.model.Parent then
+        local kept = evaluate_single_model(previous.model, aim_target_kind(previous.model), origin, fwd,
+            cam, ref_screen, max_radius_px, half_fov_cos, State.aim.sticky_lock)
+        if kept then
+            if State.aim.sticky_lock then return kept end
+            pool[1] = kept
         end
     end
-
-    local monster_folder = workspace:FindFirstChild("Monsters")
-    if monster_folder then
-        for _, model in ipairs(monster_folder:GetChildren()) do
-            local cand = evaluate_single_model(
-                model, aim_target_kind(model), origin, fwd, cam, ref_screen, max_radius_px, half_fov_cos, false
-            )
-            if cand then pool[#pool + 1] = cand end
-            budget_yield()
+    local now = os.clock()
+    if now >= (State.aim.roster_at or 0) then
+        local roster = {}
+        for _, name in ipairs({ "Monsters", "Watchers" }) do
+            local folder = workspace:FindFirstChild(name)
+            if folder then for _, model in ipairs(folder:GetChildren()) do
+                table.insert(roster, { model = model, kind = name == "Watchers" and "Watcher" or aim_target_kind(model) })
+            end end
         end
-    end
-
-    local watcher_folder = workspace:FindFirstChild("Watchers")
-    if watcher_folder then
-        for _, model in ipairs(watcher_folder:GetChildren()) do
-            local cand = evaluate_single_model(
-                model, "Watcher", origin, fwd, cam, ref_screen, max_radius_px, half_fov_cos, false
-            )
-            if cand then pool[#pool + 1] = cand end
-            budget_yield()
-        end
-    end
-
-    if State.aim.target_kind == "all" or State.aim.target_kind == "human" then
-        for _, other in ipairs(Players:GetPlayers()) do
-            if other ~= Players.LocalPlayer and other.Character then
-                local cand = evaluate_single_model(
-                    other.Character, "Player", origin, fwd, cam, ref_screen, max_radius_px, half_fov_cos, false
-                )
-                if cand then pool[#pool + 1] = cand end
-            budget_yield()
+        if State.aim.target_kind == "all" or State.aim.target_kind == "human" then
+            for _, player in ipairs(Players:GetPlayers()) do
+                if player ~= Players.LocalPlayer and player.Character then table.insert(roster, { model = player.Character, kind = "Player" }) end
             end
         end
+        State.aim.roster, State.aim.roster_at = roster, now + 1
+        State.aim.roster_cursor = State.aim.roster_cursor or 1
     end
+    local roster = State.aim.roster or {}
+    local slice = os.clock()
+    local evaluated = 0
+    for i = 1, math.min(8, #roster) do
+        local index = ((State.aim.roster_cursor or 1) - 1) % #roster + 1
+        local entry = roster[index]
+        State.aim.roster_cursor = index + 1
+        if entry.model.Parent and aim_kind_allowed(entry.kind) then
+            local candidate = evaluate_single_model(entry.model, entry.kind, origin, fwd, cam,
+                ref_screen, max_radius_px, half_fov_cos, false)
+            if candidate then table.insert(pool, candidate) end
+            evaluated += 1
+        end
+        if os.clock() - slice > 0.0015 then RunService.Heartbeat:Wait(); slice = os.clock() end
+    end
+    State.aim.models_per_pass = evaluated
 
     if #pool == 0 then return nil end
 
@@ -1777,7 +1822,7 @@ end
 local function aim_get_current_target()
     local target = State.aim.target_cache
     if not target or os.clock() - (State.aim.target_cache_at or 0) > 0.5 then return nil end
-    if not target.model.Parent or not target.part.Parent or not is_model_alive(target.model) then return nil end
+    if not target.model.Parent or not target.part.Parent then return nil end
     return target
 end
 
@@ -2066,6 +2111,9 @@ function restore_aim()
     if State.aim.scan_worker then pcall(task.cancel, State.aim.scan_worker); State.aim.scan_worker = nil end
     State.aim.target_cache = nil
     State.aim.target_cache_at = 0
+    State.aim.roster = nil
+    State.aim.roster_at = 0
+    table.clear(aim_rig_cache)
     State.aim.locked = nil
     State.aim.locked_model = nil
     State.aim.hold_off = 0
@@ -2133,11 +2181,10 @@ local function apply_aim(enabled)
             end
             State.aim.scan_ms = (os.clock() - start) * 1000
             State.aim.scan_count = (State.aim.scan_count or 0) + 1
-            task.wait(State.perf.potato and 0.15 or 0.1)
+            task.wait(State.perf.potato and 0.25 or 0.15)
         end
     end)
     State.aim.scan_worker = worker
-    table.insert(State.threads, worker)
 
     aim_conn = RunService.RenderStepped:Connect(function()
         if not State.aim.enabled then
@@ -2146,7 +2193,8 @@ local function apply_aim(enabled)
         end
 
         -- Nolkan recoil climb & side di u11 jika No Recoil aktif
-        if State.aim.no_recoil and type(State.aim.u11_fn) == "function" and type(debug) == "table" and type(debug.setupvalue) == "function" then
+        if State.aim.no_recoil and os.clock() >= (State.aim.next_recoil or 0) and type(State.aim.u11_fn) == "function" and type(debug) == "table" and type(debug.setupvalue) == "function" then
+            State.aim.next_recoil = os.clock() + 1 / 30
             local u11 = State.aim.u11_fn
             pcall(function()
                 for index = 28, 32 do
@@ -2189,7 +2237,11 @@ local function apply_aim(enabled)
         if not target or not target.part then return end
 
         local muzzle_origin = get_muzzle_origin()
-        local ballistics = aim_ballistics()
+        if now >= (State.aim.frame_ballistics_at or 0) then
+            State.aim.frame_ballistics = aim_ballistics()
+            State.aim.frame_ballistics_at = now + 0.1
+        end
+        local ballistics = State.aim.frame_ballistics
         local target_pos = aim_solve_point(
             muzzle_origin, target.part.Position, target.part.AssemblyLinearVelocity, ballistics, true
         )
@@ -2205,7 +2257,6 @@ local function apply_aim(enabled)
             send_look_remote(muzzle_origin, target_pos)
         end
     end)
-    table.insert(State.connections, aim_conn)
 end
 
 -- ---------------------------------------------------------------------------
@@ -2536,6 +2587,14 @@ local function init_visuals_tab(tab)
         Text = "Reduce label overlap", Default = false,
         Tooltip = "Prioritize threats, keep the crosshair clear, and hide overlapping labels. Outlines stay visible.",
         Callback = function(v) State.esp.declutter = v end,
+    })
+    layout:AddSlider("HushESPInstances", {
+        Text = "Label objects (nearest first)", Default = 48, Min = 12, Max = 96, Rounding = 0,
+        Callback = function(v) State.esp.render_limit = v end,
+    })
+    layout:AddSlider("HushOutlineBudget", {
+        Text = "Outline objects (nearest first)", Default = 24, Min = 4, Max = 48, Rounding = 0,
+        Callback = function(v) State.esp.outline_limit = v end,
     })
     layout:AddSlider("HushESPBudget", {
         Text = "Visible labels", Default = 24, Min = 6, Max = 48, Rounding = 0,
@@ -3068,7 +3127,7 @@ local function boot()
     -- Thread Loop ESP (Differential Pooling)
     local esp_thread = task.spawn(function()
         while true do
-            task.wait(State.perf.potato and 0.4 or 0.2)
+            task.wait(State.perf.potato and 0.6 or 0.35)
             local ok, err = pcall(run_esp_cycle)
             if not ok and os.clock() - (State.esp.last_error_at or -10) > 5 then
                 State.esp.last_error_at = os.clock()

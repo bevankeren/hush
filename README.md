@@ -57,7 +57,7 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/bevankeren/hush/main/
   menurunkan efek grafis dan kepadatan ESP; tidak menyalakan ESP/aimbot secara otomatis.
 - Container memakai indeks event-driven, bukan scan seluruh Workspace setiap 3 detik.
 - Discovery target dipisah dari render, dengan cache rig dan penyaringan jarak/FOV awal.
-  Pencarian dibatasi maksimal 10 Hz (6,7 Hz pada Potato); tracking tetap per-frame.
+  Pencarian dibatasi maksimal 6,7 Hz (4 Hz pada Potato); tracking tetap per-frame.
   Mode kamera/look menunggu tombol aktivasi sebelum mencari target.
 - Flat scenery hanya mengubah properti visual di `Town.Details`/`Town.Wild`.
   Material, collision, prompt, karakter dan geometri tidak dihapus/diubah.
@@ -90,3 +90,22 @@ Hook senjata v2 meneruskan paket lewat native `FireServer`, sehingga pengecekan
 input/raycast di dalam hook tidak mengubah metode equip/reload. Hanya aksi `Fire`
 yang boleh dipatch; jumlah argumen dan trailing nil dipertahankan. Dispatch state
 selalu diperbarui saat re-execute tanpa memasang wrapper v2 berulang.
+
+
+### Budget kerja (revisi ringan)
+
+- Maksimal 8 rig baru per pass aim, roster di-cache 1 detik dan dijelajahi
+  round-robin. Target lama dicek lagi. Pemilihan target dapat lebih lambat pada
+  server ramai; tidak semua rig diperiksa serentak.
+- Maksimal 16 visibility raycasts per pass. Target yang belum lolos tes visibilitas
+  tidak dianggap terlihat; pencarian dilanjutkan pada pass berikutnya.
+- Maksimal 48 label yang masuk layar dan 24 outline terdekat; kedua batas normal
+  tersedia di ESP Layout. Potato memakai 20 objek label / 12 outline dan declutter.
+  Karena budget, tidak semua objek dalam radius akan tampil sekaligus.
+- Tick ESP 0,35 detik normal / 0,6 detik Potato, dibagi antar-frame.
+- Per-model event listeners dan query bounding box dihilangkan dari discovery.
+  Worker aim/graphics tidak ditambahkan terus-menerus ke registry ketika toggle diulang.
+- Potato tidak lagi otomatis menjalankan scan Flat scenery. Flat masih opt-in terpisah.
+- Sampel foreground singkat di satu sesi: tanpa hub 23,7 FPS; hub OFF 22,6;
+  aim aktif terus 21,7; Potato 25,5. Bukan benchmark panjang atau bukti penyebab
+  force-close, dan bukan jaminan FPS/ketahanan untuk semua perangkat/server.

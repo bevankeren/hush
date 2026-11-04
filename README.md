@@ -70,3 +70,15 @@ Syntax dikompilasi memakai Luau resmi. Cold-start OFF, target acquisition pada f
 penolakan target mati, penghentian worker, cache container dinamis dan restore grafis
 sudah diuji pada client. Tidak ada jaminan FPS tertentu, bebas anticheat, atau hasil
 peluru/loot di server; pengujian tersebut tidak dilakukan untuk rilis ini.
+
+
+### FOV dan outline per kategori
+
+Aimbot ON otomatis menyalakan Show FOV Circle; checkbox FOV tetap bisa dimatikan
+manual. Fresh execute tetap semua toggle OFF.
+
+Di Visuals, aktifkan ESP kategori yang dibutuhkan lalu toggle Outline di kategori
+tersebut: creature, player, container, ground loot/bag, atau trap. Outline menembus
+dinding tanpa fill solid, mengikuti jarak/filter ESP, dan independen dari label.
+ESP kategori OFF juga membersihkan outline-nya. Super Potato mematikan kelima
+outline sementara; ketika preset OFF, pilihan sebelumnya dikembalikan.

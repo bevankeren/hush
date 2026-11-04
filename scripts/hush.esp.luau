@@ -26,7 +26,11 @@ local State = {
     esp = {
         enabled = true,
         declutter = false,
-        highlights = false,
+        outline_monsters = false,
+        outline_players = false,
+        outline_containers = false,
+        outline_loot = false,
+        outline_traps = false,
         label_budget = 24,
         detail_distance = 120,
         visible_labels = 0,
@@ -484,14 +488,19 @@ set_potato = function(enabled)
     local ids = { "HushShadows", "HushParticles", "HushPostEffects", "HushTerrainOpt", "HushFlatWorld" }
     if enabled then
         local saved = { toggles = {}, budget = State.esp.label_budget, detail = State.esp.detail_distance,
-            highlights = State.esp.highlights, declutter = State.esp.declutter }
+            outlines = {}, declutter = State.esp.declutter }
+        for _, id in ipairs({ "HushMonsterOutline", "HushPlayerOutline", "HushContainerOutline", "HushLootOutline", "HushTrapOutline" }) do
+            saved.outlines[id] = lib.Toggles[id].Value
+        end
         for _, id in ipairs(ids) do saved.toggles[id] = lib.Toggles[id].Value end
         State.perf.saved_preset = saved
         State.perf.potato = true
         for _, id in ipairs(ids) do lib.Toggles[id]:SetValue(true) end
         lib.Options.HushESPBudget:SetValue(12)
         lib.Options.HushESPDetailDistance:SetValue(70)
-        lib.Toggles.HushESPHighlights:SetValue(false)
+        for _, id in ipairs({ "HushMonsterOutline", "HushPlayerOutline", "HushContainerOutline", "HushLootOutline", "HushTrapOutline" }) do
+            lib.Toggles[id]:SetValue(false)
+        end
         lib.Toggles.HushESPDeclutter:SetValue(true)
     else
         State.perf.potato = false
@@ -500,7 +509,7 @@ set_potato = function(enabled)
             for _, id in ipairs(ids) do lib.Toggles[id]:SetValue(saved.toggles[id]) end
             lib.Options.HushESPBudget:SetValue(saved.budget)
             lib.Options.HushESPDetailDistance:SetValue(saved.detail)
-            lib.Toggles.HushESPHighlights:SetValue(saved.highlights)
+            for id, value in pairs(saved.outlines) do lib.Toggles[id]:SetValue(value) end
             lib.Toggles.HushESPDeclutter:SetValue(saved.declutter)
         end
         State.perf.saved_preset = nil
@@ -646,8 +655,20 @@ local function upsert_esp_billboard(key, target_part, primary_text, secondary_te
     if entry.l2.Text ~= (secondary_text or "") then entry.l2.Text = secondary_text or "" end
 end
 
-local function upsert_highlight(key, model, fill_color, outline_color, fill_trans, seen_hl)
-    if not State.esp.highlights then return end
+local function set_outline(category, enabled)
+    State.esp["outline_" .. category] = enabled
+    if enabled then return end
+    for key, entry in pairs(State.esp.cache_highlights) do
+        if entry.category == category then
+            if entry.hl then entry.hl:Destroy() end
+            State.esp.cache_highlights[key] = nil
+        end
+    end
+end
+
+local function upsert_highlight(key, model, fill_color, outline_color, fill_trans, seen_hl, category)
+    if not State.esp["outline_" .. category] then return end
+    if not model:IsA("Model") and not model:IsA("BasePart") then return end
     seen_hl[key] = true
     local entry = State.esp.cache_highlights[key]
     if not entry or not entry.hl or not entry.hl.Parent then
@@ -655,14 +676,14 @@ local function upsert_highlight(key, model, fill_color, outline_color, fill_tran
         hl.Name = "HushHighlight"
         hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
         hl.Parent = get_esp_folder()
-        entry = { hl = hl }
+        entry = { hl = hl, category = category }
         State.esp.cache_highlights[key] = entry
     end
     entry.hl.Adornee = model
     entry.hl.FillColor = fill_color or Color3.fromRGB(210, 150, 90)
     entry.hl.OutlineColor = outline_color or entry.hl.FillColor
-    entry.hl.FillTransparency = math.max(fill_trans or 0.97, 0.94)
-    entry.hl.OutlineTransparency = 0.55
+    entry.hl.FillTransparency = 1
+    entry.hl.OutlineTransparency = 0.25
 end
 
 -- Layout runs on the ESP tick, never every render frame.
@@ -716,9 +737,9 @@ local function layout_esp_labels(origin)
             end
             local hl = State.esp.cache_highlights[key]
             if hl then
-                hl.hl.FillTransparency = locked and 0.94 or 1
+                hl.hl.FillTransparency = 1
                 hl.hl.OutlineTransparency = locked and 0.18 or urgent and 0.28
-                    or math.clamp(0.42 + distance / 2200, 0.42, 0.85)
+                    or math.clamp(0.25 + distance / 5000, 0.25, 0.65)
             end
         end
     end
@@ -992,7 +1013,7 @@ local function run_esp_cycle()
                 fill_trans = 0.90
             end
 
-            upsert_highlight(monster, monster, color, color, fill_trans, seen_hl)
+            upsert_highlight(monster, monster, color, color, fill_trans, seen_hl, "monsters")
             upsert_esp_billboard(
                 monster,
                 ppart,
@@ -1048,6 +1069,7 @@ local function run_esp_cycle()
                             end
 
                              if not State.esp.loot_high_tier_only or category == "high" or group.is_bag or group.is_body or group.is_drop then
+                                upsert_highlight(item, item:IsA("Model") and item or ppart, color, color, 1, seen_hl, "loot")
                                 upsert_esp_billboard(
                                     item,
                                     ppart,
@@ -1083,6 +1105,8 @@ local function run_esp_cycle()
                             local known_items = State.esp.container_items[container]
 
                             if not State.esp.containers_high_only or tier == "high" or tier == "med" or known_items ~= nil then
+                                local outline_color = known_items and Color3.fromRGB(80, 245, 155) or color
+                                upsert_highlight(container, container, outline_color, outline_color, 1, seen_hl, "containers")
                                 if known_items then
                                     upsert_esp_billboard(
                                         container,
@@ -1122,6 +1146,8 @@ local function run_esp_cycle()
                 if trap:IsA("BasePart") then
                     local dist = (trap.Position - my_pos).Magnitude
                     if dist <= State.esp.max_trap_dist then
+                        local color = Color3.fromRGB(245, 95, 95)
+                        upsert_highlight(trap, trap, color, color, 1, seen_hl, "traps")
                         upsert_esp_billboard(
                             trap,
                             trap,
@@ -1151,7 +1177,7 @@ local function run_esp_cycle()
                     if dist <= State.esp.max_player_dist then
                         local hp_num = ohum and ohum.Health or 100
                         local p_color = Color3.fromRGB(85, 225, 145)
-                        upsert_highlight(ochar, ochar, p_color, p_color, 0.86, seen_hl)
+                        upsert_highlight(ochar, ochar, p_color, p_color, 1, seen_hl, "players")
                         upsert_esp_billboard(
                             ochar,
                             oroot,
@@ -2078,6 +2104,8 @@ local function apply_aim(enabled)
         return
     end
 
+    local lib = getgenv().HushLibrary
+    if lib and lib.Toggles.HushAimCircle then lib.Toggles.HushAimCircle:SetValue(true) end
     ensure_unified_namecall_hook()
 
     if aim_conn then return end
@@ -2429,7 +2457,7 @@ local function init_combat_tab(tab)
     panel2:AddToggle("HushAimCircle", {
         Text = "Show FOV Circle",
         Default = false,
-        Tooltip = "Lingkaran FOV berubah hijau saat target terkunci.",
+        Tooltip = "Otomatis ON saat Aimbot diaktifkan. Bisa dimatikan manual; hijau saat target terkunci.",
         Callback = function(v) State.aim.fov_circle = v end,
     })
 
@@ -2500,10 +2528,6 @@ local function init_visuals_tab(tab)
         Tooltip = "Prioritize threats, keep the crosshair clear, and hide overlapping labels. Outlines stay visible.",
         Callback = function(v) State.esp.declutter = v end,
     })
-    layout:AddToggle("HushESPHighlights", {
-        Text = "Entity outlines", Default = false,
-        Callback = function(v) State.esp.highlights = v end,
-    })
     layout:AddSlider("HushESPBudget", {
         Text = "Visible labels", Default = 24, Min = 6, Max = 48, Rounding = 0,
         Callback = function(v) State.esp.label_budget = v end,
@@ -2526,6 +2550,12 @@ local function init_visuals_tab(tab)
         Callback = function(v) State.esp.monsters = v end,
     })
 
+    panel_ent:AddToggle("HushMonsterOutline", {
+        Text = "Creature Outline", Default = false,
+        Tooltip = "Outline through walls for this ESP category only. Enable the matching ESP and choose its distance/filter above.",
+        Callback = function(v) set_outline("monsters", v) end,
+    })
+
     panel_ent:AddSlider("HushMonsterDist", {
         Text = "Monster Distance",
         Default = 1500,
@@ -2545,6 +2575,12 @@ local function init_visuals_tab(tab)
         Callback = function(v) State.esp.players = v end,
     })
 
+    panel_ent:AddToggle("HushPlayerOutline", {
+        Text = "Player Outline", Default = false,
+        Tooltip = "Outline through walls for this ESP category only. Enable the matching ESP and choose its distance/filter above.",
+        Callback = function(v) set_outline("players", v) end,
+    })
+
     panel_ent:AddSlider("HushPlayerDist", {
         Text = "Player Distance",
         Default = 1500,
@@ -2562,6 +2598,12 @@ local function init_visuals_tab(tab)
         Default = false,
         Tooltip = "Tampilkan pecahan kaca, kaleng, dan alarm bunyi di sekitar karakter.",
         Callback = function(v) State.esp.traps = v end,
+    })
+
+    panel_ent:AddToggle("HushTrapOutline", {
+        Text = "Trap Outline", Default = false,
+        Tooltip = "Outline through walls for this ESP category only. Enable the matching ESP and choose its distance/filter above.",
+        Callback = function(v) set_outline("traps", v) end,
     })
 
     panel_ent:AddSlider("HushTrapDist", {
@@ -2607,6 +2649,12 @@ local function init_visuals_tab(tab)
         Callback = function(v) State.esp.containers = v end,
     })
 
+    panel_loot:AddToggle("HushContainerOutline", {
+        Text = "Container Outline", Default = false,
+        Tooltip = "Outline through walls for this ESP category only. Enable the matching ESP and choose its distance/filter above.",
+        Callback = function(v) set_outline("containers", v) end,
+    })
+
     panel_loot:AddToggle("HushContainerHighOnly", {
         Text = "High-Tier Containers Only",
         Default = false,
@@ -2647,6 +2695,12 @@ local function init_visuals_tab(tab)
         Default = false,
         Tooltip = "Tampilkan item di WorldFinds, LootBags, Bodies, dan SupplyDrops.",
         Callback = function(v) State.esp.loot = v end,
+    })
+
+    panel_loot:AddToggle("HushLootOutline", {
+        Text = "Ground Loot / Bag Outline", Default = false,
+        Tooltip = "Outline through walls for this ESP category only. Enable the matching ESP and choose its distance/filter above.",
+        Callback = function(v) set_outline("loot", v) end,
     })
 
     panel_loot:AddToggle("HushLootHighTierOnly", {

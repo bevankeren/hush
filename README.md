@@ -165,3 +165,12 @@ plum `#4A1B58`, accent pink-magenta `#D65EC8`, outline lilac `#9962B2`, teks
 bukan menyalin ilustrasi papan kayu/jaring. Tidak menambah gambar atau animasi.
 Warna semantik ESP, termasuk Player LOS kuning/hijau, tidak berubah. Compile dan
 fixture penerapan tema lulus; tampilan live belum dicek karena client belum tersambung.
+
+
+### Always On (opsional)
+
+Di Combat, aktifkan **Always On (no hold)** untuk sekaligus menyalakan Camera
+Aimbot tanpa menahan tombol. Key release tidak mematikannya. Master Camera Aimbot
+OFF tetap menghentikan aim; mengetik juga menjeda tracking. Nonaktifkan Always On
+untuk menghentikan aim dan kembali ke kontrol keybind Hold/Toggle. Ini setting mode,
+bukan auto-start: fresh execute tetap semua toggle OFF. Camera-only tetap berlaku.

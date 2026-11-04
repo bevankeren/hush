@@ -145,6 +145,7 @@ local State = {
         fov_circle_locked_color = Color3.fromRGB(80, 255, 140),
         fov_circle_transparency = 0.75,
         activation_picker = nil,
+        always_on = false,
         smooth = 35,
         max_distance = 600,
         bone = "vital",           -- "vital" | "head" | "body" | "legs"
@@ -2162,6 +2163,16 @@ local function safe_label_write(label, text)
 end
 
 -- TAB 1: COMBAT (Aimbot + Weapon Mods & Diagnostics)
+local function set_aim_always(enabled)
+    State.aim.always_on = enabled
+    local picker = State.aim.activation_picker
+    if picker then picker.SyncToggleState = not enabled end
+    local lib = getgenv().HushLibrary
+    if lib and lib.Toggles.HushAimToggle then
+        lib.Toggles.HushAimToggle:SetValue(enabled)
+    end
+end
+
 local function init_combat_tab(tab)
     local panel = tab:AddGroupbox({ Side = "Left", Name = "Aimbot", IconName = "crosshair" })
     local aim_toggle = panel:AddToggle("HushAimToggle", {
@@ -2172,6 +2183,11 @@ local function init_combat_tab(tab)
     State.aim.activation_picker = aim_toggle:AddKeyPicker("HushAimKeybind", {
         Default = "MB2", Mode = "Hold", Modes = { "Hold", "Toggle" },
         SyncToggleState = true, Text = "Aimbot activation",
+    })
+    panel:AddToggle("HushAimAlways", {
+        Text = "Always On (no hold)", Default = false,
+        Tooltip = "Enables Camera Aimbot continuously and ignores key release. Main Camera Aimbot switch still stops aim; typing still pauses it. Turn this OFF to return to keybind control.",
+        Callback = function(v) set_aim_always(v) end,
     })
     panel:AddLabel("Click key box to rebind; right-click: Hold / Toggle.")
     panel:AddLabel("FOV + lock + visibility + lead: included.")

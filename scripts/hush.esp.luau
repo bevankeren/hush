@@ -1,6 +1,22 @@
 -- HUSH hub · Luau / Madium-Chimera
 -- ESP: light labels, proximity detail, screen-space declutter.
 
+-- Camera-only compatibility build: no weapon/namecall/upvalue hooks.
+if getgenv().__HushNamecallHooked or getgenv().__HushOrigSight or getgenv().__HushOrigSpread then
+    local previous = getgenv().HushSession
+    local old = previous and previous.state
+    if old then
+        if old.aim then old.aim.enabled, old.aim.no_recoil, old.aim.no_spread = false, false, false end
+        if old.silencer then old.silencer.enabled = false end
+        previous.active = false
+    end
+    getgenv().__HushNamecallState = nil
+    local runtime = getgenv().__HushNamecallRuntime
+    if runtime then runtime.state = nil end
+    warn("[hush] Restart Roblox before loading this build. Old weapon hooks are still installed; hot-unhook is not attempted.")
+    return
+end
+
 local Players = game:GetService("Players")
 local CoreGui = game:GetService("CoreGui")
 local RunService = game:GetService("RunService")
@@ -1531,10 +1547,7 @@ local function is_model_alive(model)
     return true
 end
 
--- Pilih part terbaik pada model, dengan opsi multi-point visibility fallback
--- Pada mode "vital", rotasi otomatis 1x Head : 2x Torso berdasarkan jumlah tembakan
--- agar rasio Bayesian CheatFlags (LrHead=1.15 * LrBody=0.90 * LrBody=0.90 = 0.9315 < 1.0)
--- selalu menurunkan skor kecurigaan server alih-alih naik ke AimKickAt (0.90).
+-- Cache body-part lookup for camera targeting.
 local aim_rig_cache = setmetatable({}, { __mode = "k" })
 local aim_cache_events_started = false
 local function aim_rig(model)
@@ -1568,10 +1581,6 @@ end
 
 local function aim_pick_vital(model, origin, require_vis)
     local order = AIM_BONES[State.aim.bone] or AIM_BONES.vital
-    if State.aim.bone == "vital" then
-        local shot_mod = (State.aim.stats and State.aim.stats.fired or 0) % 3
-        order = (shot_mod == 0) and AIM_BONES.head or AIM_BONES.body
-    end
     local rig = aim_rig(model)
     local best_any, best_score, best_vis, vis_score = nil, math.huge, nil, math.huge
     for rank, name in ipairs(order) do
@@ -1870,241 +1879,9 @@ local function aim_step_towards(cam, target_pos)
     return CFrame.lookAt(origin, origin + noisy_look, Vector3.yAxis)
 end
 
-local function aim_look_angles(origin, target_pos)
-    local delta = target_pos - origin
-    if delta.Magnitude < 0.001 then return 0, 0 end
-    local yaw = math.atan2(-delta.X, -delta.Z)
-    local pitch = math.asin(math.clamp(delta.Unit.Y, -1, 1))
-    return yaw, pitch
-end
 
-local function send_look_remote(origin, target_pos)
-    local now = os.clock()
-    if now - (State.aim.last_sent or 0) < 1 / 30 then return end
-    State.aim.last_sent = now
-    local yaw_rad, pitch_rad = aim_look_angles(origin, target_pos)
-    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
-    local look = remotes and remotes:FindFirstChild("Look")
-    if look then
-        pcall(function()
-            look:FireServer(yaw_rad, pitch_rad)
-        end)
-    end
-end
 
--- ---------------------------------------------------------------------------
--- native PlayerScripts.Client.Guns hook & unified __namecall hook
--- ---------------------------------------------------------------------------
--- Terbukti dari reverse-engineering u11 di PlayerScripts.Client.Guns:
---   Remotes.Gun:FireServer("Fire", dir_unit_vec3, spread_deg, cuts_num, head_pos_vec3, shot_seq)
---   - arg[1] = "Fire"
---   - arg[2] = Vector3 arah unit ((hit_pos - head.Position).Unit)
---   - arg[3] = number spread (derajat)
---   - arg[4] = number (-1 untuk senjata api)
---   - arg[5] = Vector3 Head.Position (origin tembakan — JANGAN ditimpa dengan hit_pos!)
---   - arg[6] = number shotSeq
--- Selain itu, u11 memanggil upvalue 7 `tbl7.sight(cam, lookVec, head, range)`
--- untuk mendapatkan `{ Position = hit_pos }` sebelum menghitung arah peluru client
--- (`Rounds.fly`) dan mengirim `Remotes.Gun:FireServer`.
 
-local function aim_log_gun_args(s, args)
-    if s.aim.stats.args_logged then return end
-    s.aim.stats.args_logged = true
-    local shape = {}
-    for i, arg in ipairs(args) do
-        shape[#shape + 1] = i .. ":" .. typeof(arg)
-    end
-    s.aim.stats.gun_arg_shape = table.concat(shape, " ")
-    s.aim.stats.gun_arg_count = #args
-end
-
-local function aim_patch_args(s, args, muzzle_origin, hit_pos)
-    local delta = hit_pos - muzzle_origin
-    local unit_dir = delta.Magnitude > 0.01 and delta.Unit or Vector3.new(0, 0, -1)
-
-    -- Format eksak Remotes.Gun:FireServer("Fire", dir_unit, spread, cuts, head_pos, shotSeq)
-    if args[1] == "Fire" and typeof(args[2]) == "Vector3" then
-        local shoot_from = typeof(args[5]) == "Vector3" and args[5] or muzzle_origin
-        local exact_delta = hit_pos - shoot_from
-        if exact_delta.Magnitude > 0.01 then
-            args[2] = exact_delta.Unit
-        else
-            args[2] = unit_dir
-        end
-        if s.aim.no_spread and type(args[3]) == "number" then
-            args[3] = 0
-        end
-        return true
-    end
-
-    -- Fallback generik jika action berbeda
-    local patched = false
-    for i, arg in ipairs(args) do
-        local t = typeof(arg)
-        if t == "Vector3" then
-            if math.abs(arg.Magnitude - 1) < 0.05 then
-                args[i] = unit_dir
-                patched = true
-            elseif (arg - muzzle_origin).Magnitude > 12 and (arg - muzzle_origin).Magnitude < s.aim.max_distance * 2.5 then
-                args[i] = hit_pos
-                patched = true
-            end
-        elseif t == "CFrame" and (arg.Position - muzzle_origin).Magnitude < 12 then
-            args[i] = CFrame.lookAt(arg.Position, hit_pos, Vector3.yAxis)
-            patched = true
-        end
-    end
-    return patched
-end
-
-local function is_trigger_active()
-    local trig = State.aim.trigger
-    if trig == "always" then
-        return true
-    elseif trig == "rmb" then
-        return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
-    elseif trig == "lmb" then
-        return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
-    end
-    return true
-end
-
-local function ensure_client_guns_hook()
-    if type(debug) ~= "table" or type(debug.getupvalue) ~= "function" or type(debug.setupvalue) ~= "function" then
-        return
-    end
-    local lp = Players.LocalPlayer
-    local ps = lp and lp:FindFirstChild("PlayerScripts")
-    local client_folder = ps and ps:FindFirstChild("Client")
-    local guns_scr = client_folder and client_folder:FindFirstChild("Guns")
-    if not guns_scr then return end
-
-    local ok, guns_mod = pcall(require, guns_scr)
-    if not ok or type(guns_mod) ~= "table" or type(guns_mod.enable) ~= "function" then
-        return
-    end
-
-    pcall(function()
-        local u6 = debug.getupvalue(guns_mod.enable, 6)
-        local u8 = u6 and debug.getupvalue(u6, 8)
-        local u11 = u8 and debug.getupvalue(u8, 11)
-        if type(u11) ~= "function" then return end
-
-        State.aim.u11_fn = u11
-
-        -- Hook tbl7.sight agar tracer client (Rounds.fly) & arah peluru (Head -> Target)
-        -- bebas parallax kamera bahu dan langsung mengarah ke titik balistik 3D
-        local tbl7 = debug.getupvalue(u11, 7)
-        if type(tbl7) == "table" and type(tbl7.sight) == "function" then
-            if not getgenv().__HushOrigSight then
-                getgenv().__HushOrigSight = tbl7.sight
-            end
-            local orig_sight = getgenv().__HushOrigSight
-            tbl7.sight = function(cam, look, head_part, rng)
-                local active = getgenv().__HushNamecallState
-                if active and active.aim and active.aim.enabled then
-                    local target = active.aim.locked or aim_get_current_target()
-                    if target and target.part and (active.aim.mode == "silent" or is_trigger_active()) then
-                        local m_origin = (typeof(head_part) == "Instance" and head_part:IsA("BasePart")) and head_part.Position or get_muzzle_origin()
-                        local ballistics = aim_ballistics()
-                        local hit_pos = aim_solve_point(
-                            m_origin, target.part.Position, target.part.AssemblyLinearVelocity, ballistics, true
-                        )
-                        return m_origin, { Position = hit_pos, Instance = target.part, Normal = Vector3.yAxis, Material = Enum.Material.Plastic }
-                    end
-                end
-                return orig_sight(cam, look, head_part, rng)
-            end
-        end
-
-        -- Hook u14 (fungsi kalkulasi spread derajat)
-        local u14 = debug.getupvalue(u11, 14)
-        if type(u14) == "function" then
-            if not getgenv().__HushOrigSpread then
-                getgenv().__HushOrigSpread = u14
-            end
-            local orig_spread = getgenv().__HushOrigSpread
-            debug.setupvalue(u11, 14, function(def)
-                local active = getgenv().__HushNamecallState
-                if active and active.aim and active.aim.no_spread then
-                    return 0
-                end
-                return orig_spread(def)
-            end)
-        end
-    end)
-end
-
-local function unhook_client_guns()
-    pcall(function()
-        local u11 = State.aim.u11_fn
-        if type(u11) == "function" then
-            local tbl7 = debug.getupvalue(u11, 7)
-            if type(tbl7) == "table" and getgenv().__HushOrigSight then
-                tbl7.sight = getgenv().__HushOrigSight
-            end
-            if getgenv().__HushOrigSpread then
-                debug.setupvalue(u11, 14, getgenv().__HushOrigSpread)
-            end
-        end
-    end)
-end
-
-local function ensure_unified_namecall_hook()
-    getgenv().__HushNamecallState = State
-    -- Refresh dispatch on re-execution; the installed wrapper must not retain old State closures.
-    getgenv().__HushNamecallRuntime = {
-        state = State, log = aim_log_gun_args, trigger = is_trigger_active,
-        target = aim_get_current_target, origin = get_muzzle_origin,
-        ballistics = aim_ballistics, solve = aim_solve_point,
-        look = send_look_remote, patch = aim_patch_args,
-    }
-    ensure_client_guns_hook()
-    if getgenv().__HushNamecallVersion == 2 then return end
-    if type(getnamecallmethod) ~= "function" then return end
-
-    local prototype = Instance.new("RemoteEvent")
-    local native_fire_server = prototype.FireServer
-    prototype:Destroy()
-    local raw_meta = getrawmetatable(game)
-    local old_namecall = raw_meta.__namecall
-    setreadonly(raw_meta, false)
-    raw_meta.__namecall = newcclosure(function(self, ...)
-        local method = getnamecallmethod()
-        if (method == "FireServer" or method == "fireServer") and typeof(self) == "Instance" then
-            local name = self.Name
-            local runtime = getgenv().__HushNamecallRuntime
-            local active = runtime and runtime.state
-            if name == "Voice" and active and active.silencer.enabled then return nil end
-            if name == "Gun" and self:IsA("RemoteEvent") then
-                local args = table.pack(...)
-                -- Equip, reload, aiming and all non-shot packets remain byte-for-byte arguments.
-                if active and args[1] == "Fire" then
-                    runtime.log(active, args)
-                    if active.aim.no_spread and type(args[3]) == "number" then args[3] = 0 end
-                    if active.aim.enabled and (active.aim.mode == "silent" or runtime.trigger()) then
-                        local target = active.aim.locked or runtime.target()
-                        if target and target.part and target.part.Parent then
-                            local origin = typeof(args[5]) == "Vector3" and args[5] or runtime.origin()
-                            local hit = runtime.solve(origin, target.part.Position, target.part.AssemblyLinearVelocity,
-                                runtime.ballistics(), true)
-                            if active.aim.mode == "silent" and active.aim.silent_look_sync then runtime.look(origin, hit) end
-                            runtime.patch(active, args, origin, hit)
-                            active.aim.stats.fired = (active.aim.stats.fired or 0) + 1
-                        end
-                    end
-                end
-                -- Direct native dispatch does not depend on the mutable namecall method slot.
-                return native_fire_server(self, table.unpack(args, 1, args.n))
-            end
-        end
-        -- No nested namecall work is done on this forwarding path.
-        return old_namecall(self, ...)
-    end)
-    setreadonly(raw_meta, true)
-    getgenv().__HushNamecallHooked = true
-    getgenv().__HushNamecallVersion = 2
-end
 
 function restore_aim()
     State.aim.enabled = false
@@ -2117,7 +1894,6 @@ function restore_aim()
     State.aim.locked = nil
     State.aim.locked_model = nil
     State.aim.hold_off = 0
-    unhook_client_guns()
     if aim_conn then
         pcall(function() aim_conn:Disconnect() end)
         aim_conn = nil
@@ -2147,6 +1923,12 @@ local function aim_victim_count()
     return n
 end
 
+local function is_trigger_active()
+    if State.aim.trigger == "rmb" then return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) end
+    if State.aim.trigger == "lmb" then return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) end
+    return State.aim.trigger == "always"
+end
+
 local function apply_aim(enabled)
     State.aim.enabled = enabled
     if not enabled then
@@ -2156,13 +1938,12 @@ local function apply_aim(enabled)
 
     local lib = getgenv().HushLibrary
     if lib and lib.Toggles.HushAimCircle then lib.Toggles.HushAimCircle:SetValue(true) end
-    ensure_unified_namecall_hook()
 
     if aim_conn then return end
 
     local worker = task.spawn(function()
         while State.session.active and State.aim.enabled do
-            if State.aim.mode ~= "silent" and not is_trigger_active() then
+            if not is_trigger_active() then
                 State.aim.target_cache = nil
                 task.wait(0.05)
                 continue
@@ -2190,26 +1971,6 @@ local function apply_aim(enabled)
         if not State.aim.enabled then
             if fov_circle then fov_circle.Visible = false end
             return
-        end
-
-        -- Nolkan recoil climb & side di u11 jika No Recoil aktif
-        if State.aim.no_recoil and os.clock() >= (State.aim.next_recoil or 0) and type(State.aim.u11_fn) == "function" and type(debug) == "table" and type(debug.setupvalue) == "function" then
-            State.aim.next_recoil = os.clock() + 1 / 30
-            local u11 = State.aim.u11_fn
-            pcall(function()
-                for index = 28, 32 do
-                    if type(debug.getupvalue(u11, index)) ~= "number" then
-                        State.aim.no_recoil = false
-                        warn("[hush] No Recoil stopped: incompatible gun state layout")
-                        return
-                    end
-                end
-                debug.setupvalue(u11, 28, 0) -- heat
-                debug.setupvalue(u11, 29, 0) -- recoil climb
-                debug.setupvalue(u11, 30, 0) -- recoil climb target
-                debug.setupvalue(u11, 31, 0) -- recoil side
-                debug.setupvalue(u11, 32, 0) -- recoil side target
-            end)
         end
 
         local cam = workspace.CurrentCamera
@@ -2253,8 +2014,7 @@ local function apply_aim(enabled)
 
         if State.aim.mode == "camera" then
             cam.CFrame = aim_step_towards(cam, target_pos)
-        elseif State.aim.mode == "look" then
-            send_look_remote(muzzle_origin, target_pos)
+
         end
     end)
 end
@@ -2320,13 +2080,7 @@ local function apply_movement(enabled, speed)
     end
 end
 
-local function init_voice_silencer()
-    ensure_unified_namecall_hook()
-    local meter = SoundService:FindFirstChild("HushVoiceMeter")
-    if meter and meter:IsA("AudioAnalyzer") then
-        pcall(function() meter.RmsLevel = 0 end)
-    end
-end
+
 
 -- ---------------------------------------------------------------------------
 -- pembuatan tab UI Alexandria (5-Tab Streamlined Tactical Layout)
@@ -2357,12 +2111,11 @@ local function init_combat_tab(tab)
 
     panel:AddDropdown("HushAimMode", {
         Text = "Aim Mode",
-        Values = { "Kamera", "Silent", "Look" },
+        Values = { "Kamera" },
         Default = "Kamera",
-        Tooltip = "Kamera: rotasi spherical mulus. Silent: hook tbl7.sight & Remotes.Gun. Look: kirim sudut via Remotes.Look.",
+        Tooltip = "Camera-only compatibility build. Shooting uses the unmodified game weapon pipeline.",
         Callback = function(v)
-            local map = { ["Kamera"] = "camera", ["Silent"] = "silent", ["Look"] = "look" }
-            State.aim.mode = map[v] or "camera"
+            State.aim.mode = "camera"
         end,
     })
 
@@ -2370,7 +2123,7 @@ local function init_combat_tab(tab)
         Text = "Target Hitbox",
         Values = { "Vital", "Kepala", "Badan", "Kaki" },
         Default = "Vital",
-        Tooltip = "Vital: rotasi otomatis 1x Head : 2x Torso untuk menurunkan skor Bayesian CheatFlags.",
+        Tooltip = "Prioritize valid vital parts; no weapon modification.",
         Callback = function(v)
             local map = {
                 ["Vital"] = "vital", ["Kepala"] = "head",
@@ -2453,30 +2206,16 @@ local function init_combat_tab(tab)
 
     local panel2 = tab:AddGroupbox({
         Side = "Right",
-        Name = "Weapon Mods & Stealth",
+        Name = "Camera Aim & Visibility",
         IconName = "shield",
     })
 
-    panel2:AddToggle("HushAimNoRecoil", {
-        Text = "No Recoil",
-        Default = false,
-        Tooltip = "Nolkan recoil pitch climb & yaw side di Client.Guns (u11 upvalues 28..32).",
-        Callback = function(v)
-            State.aim.no_recoil = v
-            if v then ensure_client_guns_hook() end
-        end,
-    })
 
-    panel2:AddToggle("HushAimNoSpread", {
-        Text = "No Spread",
-        Default = false,
-        Tooltip = "Nolkan kalkulasi spread u14(def) & paksa arg[3] = 0 pada Remotes.Gun.",
-        Callback = function(v)
-            State.aim.no_spread = v
-            if v then ensure_unified_namecall_hook() end
-        end,
-    })
 
+
+
+    panel2:AddLabel("Compatibility: weapon hooks disabled.")
+    panel2:AddLabel("Silent / No Recoil / No Spread / Voice block quarantined.")
     panel2:AddDivider()
 
     panel2:AddToggle("HushAimVisible", {
@@ -2507,12 +2246,7 @@ local function init_combat_tab(tab)
         Callback = function(v) State.aim.gravity_comp = v end,
     })
 
-    panel2:AddToggle("HushAimSilentLook", {
-        Text = "Silent Look Sync",
-        Default = false,
-        Tooltip = "Sinkronkan paket Remotes.Look saat menembak di mode Silent (lolos RewindView).",
-        Callback = function(v) State.aim.silent_look_sync = v end,
-    })
+
 
     panel2:AddToggle("HushAimCircle", {
         Text = "Show FOV Circle",
@@ -2829,15 +2563,7 @@ local function init_player_audio_tab(tab)
 
     local status = panel_aud:AddLabel("Mic Shield : ACTIVE")
 
-    panel_aud:AddToggle("HushVoiceSilencer", {
-        Text = "Block Voice Mic Telemetry",
-        Default = false,
-        Tooltip = "Blokir paket Remotes.Voice & nolkan HushVoiceMeter agar Listener tidak mendengar mikrofon.",
-        Callback = function(enabled)
-            State.silencer.enabled = enabled
-            safe_label_write(status, "Mic Shield : " .. (enabled and "ACTIVE (Protected)" or "OFF (Exposed)"))
-        end,
-    })
+
 
     panel_aud:AddDivider()
 
@@ -3120,8 +2846,7 @@ local function boot()
         if toggle.Value == true then toggle:SetValue(false) end
     end
 
-    -- Hooks are dormant until their feature is enabled.
-    init_voice_silencer()
+    -- No weapon hooks are installed in this build.
     init_loot_sniffer()
 
     -- Thread Loop ESP (Differential Pooling)

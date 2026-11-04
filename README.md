@@ -1,5 +1,12 @@
 # hush
 
+> **Build saat ini: camera-only compatibility.** Silent/Look Aim, No Recoil,
+> No Spread dan voice blocking dikarantina setelah laporan force-close saat
+> tembakan pertama. Tidak ada hook namecall/sight/spread atau penulisan upvalue
+> senjata. Jika pernah memuat versi hook lama, restart Roblox terlebih dahulu.
+> Isolasi native pipeline sudah dicek; kestabilan saat tembakan nyata belum diuji.
+
+
 Ruang kerja skrip Roblox. Fondasi aturan supaya siapa pun — manusia atau AI —
 yang masuk ke folder ini tidak mulai dari nol dan tidak menghilangkan jejak
 keputusan.
@@ -84,7 +91,7 @@ ESP kategori OFF juga membersihkan outline-nya. Super Potato mematikan kelima
 outline sementara; ketika preset OFF, pilihan sebelumnya dikembalikan.
 
 
-### Perbaikan equip saat Aimbot aktif
+### Riwayat: hook equip v2 (sekarang dikarantina)
 
 Hook senjata v2 meneruskan paket lewat native `FireServer`, sehingga pengecekan
 input/raycast di dalam hook tidak mengubah metode equip/reload. Hanya aksi `Fire`
@@ -109,3 +116,12 @@ selalu diperbarui saat re-execute tanpa memasang wrapper v2 berulang.
 - Sampel foreground singkat di satu sesi: tanpa hub 23,7 FPS; hub OFF 22,6;
   aim aktif terus 21,7; Potato 25,5. Bukan benchmark panjang atau bukti penyebab
   force-close, dan bukan jaminan FPS/ketahanan untuk semua perangkat/server.
+
+
+### Verifikasi build camera-only
+
+Fresh execute: 31 toggle OFF. Saat camera aim ON, pointer `__namecall`, fungsi
+`equip`/`shoot`, `sight` dan fungsi spread game teramati identik dengan sebelum
+load. Compile Luau dan tes guard sesi lama lulus. Tidak ada tembakan otomatis
+atau klaim native crash telah terselesaikan. ESP, outline per kategori dan Potato
+tetap tersedia. Riwayat penjelasan hook v2 di atas bukan fitur aktif build ini.

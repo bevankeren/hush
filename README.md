@@ -81,8 +81,8 @@ peluru/loot di server; pengujian tersebut tidak dilakukan untuk rilis ini.
 
 ### FOV dan outline per kategori
 
-Aimbot ON otomatis menyalakan Show FOV Circle; checkbox FOV tetap bisa dimatikan
-manual. Fresh execute tetap semua toggle OFF.
+Aimbot ON otomatis mencakup FOV circle; tidak ada checkbox FOV terpisah lagi.
+Fresh execute tetap semua toggle OFF.
 
 Di Visuals, aktifkan ESP kategori yang dibutuhkan lalu toggle Outline di kategori
 tersebut: creature, player, container, ground loot/bag, atau trap. Outline menembus
@@ -140,3 +140,18 @@ diklik untuk mengganti tombol; klik kanan memilih Hold / Toggle. Default MB2 Hol
 (tahan klik kanan). Keybind menyinkronkan checkbox master, bukan tombol kedua yang
 harus diaktifkan terpisah. Aim berhenti bergerak saat mengetik di text box. Fresh
 execution tetap OFF. Tetap camera-only, tanpa native weapon hooks.
+
+
+### UI ringkas
+
+Combat kini hanya satu toggle Camera Aimbot + keybind (default MB2 Hold,
+klik kanan untuk Toggle), target/hitbox, dan tiga slider FOV/smoothness/distance.
+FOV circle, sticky lock, visible-only, fallback hitbox terlihat dan ballistic lead
+ikut master aim; OFF juga membersihkan bundle. Cek ray tetap maksimal16/pass.
+Dropdown mode satu-pilihan dan tombol diagnostik dihapus dari tampilan.
+
+Anti-overlap ESP otomatis; outline per kategori tetap terpisah sesuai permintaan.
+Combat6->1 toggle; total definisi toggle31->25. Silent Aim tetap tidak tersedia,
+tidak ada toggle untuk mencobanya, dan belum terbukti aman setelah first-shot crash.
+Tidak ada native weapon hooks yang diaktifkan ulang. Revisi ini lolos compile/tes
+unit bundle; belum diverifikasi live karena client tidak tersambung saat pengujian.

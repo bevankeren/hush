@@ -528,7 +528,7 @@ set_potato = function(enabled)
         for _, id in ipairs({ "HushMonsterOutline", "HushPlayerOutline", "HushContainerOutline", "HushLootOutline", "HushTrapOutline" }) do
             lib.Toggles[id]:SetValue(false)
         end
-        lib.Toggles.HushESPDeclutter:SetValue(true)
+        State.esp.declutter = true
     else
         State.perf.potato = false
         local saved = State.perf.saved_preset
@@ -537,7 +537,7 @@ set_potato = function(enabled)
             lib.Options.HushESPBudget:SetValue(saved.budget)
             lib.Options.HushESPDetailDistance:SetValue(saved.detail)
             for id, value in pairs(saved.outlines) do lib.Toggles[id]:SetValue(value) end
-            lib.Toggles.HushESPDeclutter:SetValue(saved.declutter)
+            State.esp.declutter = saved.declutter
         end
         State.perf.saved_preset = nil
     end
@@ -1073,9 +1073,11 @@ local function run_esp_cycle()
     if not State.esp.enabled or not (State.esp.monsters or State.esp.players or State.esp.loot
         or State.esp.containers or State.esp.traps) then
         if next(State.esp.cache_tags) or next(State.esp.cache_highlights) then clear_esp() end
+        State.esp.declutter = false
         return
     end
 
+    State.esp.declutter = true
     State.esp.player_los_rays = 8
     local my_pos = get_origin_pos()
     State.esp.cycle_origin = my_pos
@@ -1926,6 +1928,8 @@ end
 
 function restore_aim()
     State.aim.enabled = false
+    State.aim.visible_only, State.aim.wall_fallback, State.aim.sticky_lock = false, false, false
+    State.aim.gravity_comp, State.aim.fov_circle = false, false
     if State.aim.scan_worker then pcall(task.cancel, State.aim.scan_worker); State.aim.scan_worker = nil end
     State.aim.target_cache = nil
     State.aim.target_cache_at = 0
@@ -1970,13 +1974,17 @@ end
 
 local function apply_aim(enabled)
     State.aim.enabled = enabled
+    -- One feature switch owns the supporting camera-only behavior.
+    State.aim.visible_only = enabled
+    State.aim.wall_fallback = enabled
+    State.aim.sticky_lock = enabled
+    State.aim.gravity_comp = enabled
+    State.aim.fov_circle = enabled
     if not enabled then
         restore_aim()
         return
     end
 
-    local lib = getgenv().HushLibrary
-    if lib and lib.Toggles.HushAimCircle then lib.Toggles.HushAimCircle:SetValue(true) end
 
     if aim_conn then return end
 
@@ -2135,227 +2143,53 @@ end
 
 -- TAB 1: COMBAT (Aimbot + Weapon Mods & Diagnostics)
 local function init_combat_tab(tab)
-    local panel = tab:AddGroupbox({
-        Side = "Left",
-        Name = "Aimbot & Targeting",
-        IconName = "crosshair",
-    })
-
+    local panel = tab:AddGroupbox({ Side = "Left", Name = "Aimbot", IconName = "crosshair" })
     local aim_toggle = panel:AddToggle("HushAimToggle", {
-        Text = "Enable Aimbot",
-        Default = false,
-        Tooltip = "Aktifkan penguncian target di dalam radius FOV.",
+        Text = "Camera Aimbot", Default = false,
+        Tooltip = "Includes FOV circle, sticky lock, visible-target checking, alternate visible hitbox and ballistic lead. Camera only: no weapon hooks.",
         Callback = function(v) apply_aim(v) end,
     })
-
-    panel:AddDropdown("HushAimMode", {
-        Text = "Aim Mode",
-        Values = { "Kamera" },
-        Default = "Kamera",
-        Tooltip = "Camera-only compatibility build. Shooting uses the unmodified game weapon pipeline.",
-        Callback = function(v)
-            State.aim.mode = "camera"
-        end,
-    })
-
-    panel:AddDropdown("HushAimBone", {
-        Text = "Target Hitbox",
-        Values = { "Vital", "Kepala", "Badan", "Kaki" },
-        Default = "Vital",
-        Tooltip = "Prioritize valid vital parts; no weapon modification.",
-        Callback = function(v)
-            local map = {
-                ["Vital"] = "vital", ["Kepala"] = "head",
-                ["Badan"] = "body", ["Kaki"] = "legs",
-            }
-            State.aim.bone = map[v] or "vital"
-        end,
-    })
-
-    panel:AddDropdown("HushAimKind", {
-        Text = "Target Filter",
-        Values = { "Semua", "Listener", "Hound", "Brute", "Watcher", "Pemain" },
-        Default = "Semua",
-        Callback = function(v)
-            local map = {
-                ["Semua"] = "all",
-                ["Listener"] = "listener",
-                ["Hound"] = "hound",
-                ["Brute"] = "brute",
-                ["Watcher"] = "watcher",
-                ["Pemain"] = "human",
-            }
-            State.aim.target_kind = map[v] or "all"
-        end,
-    })
-
     State.aim.activation_picker = aim_toggle:AddKeyPicker("HushAimKeybind", {
         Default = "MB2", Mode = "Hold", Modes = { "Hold", "Toggle" },
         SyncToggleState = true, Text = "Aimbot activation",
     })
-    panel:AddLabel("Click key box to rebind; right-click for Hold / Toggle.")
-
-
-    panel:AddDropdown("HushAimFovOrigin", {
-        Text = "FOV Center",
-        Values = { "Tengah Layar", "Kursor Mouse" },
-        Default = "Tengah Layar",
+    panel:AddLabel("Click key box to rebind; right-click: Hold / Toggle.")
+    panel:AddLabel("FOV + lock + visibility + lead: included.")
+    panel:AddDropdown("HushAimBone", {
+        Text = "Hitbox", Values = { "Vital", "Kepala", "Badan", "Kaki" }, Default = "Vital",
         Callback = function(v)
-            State.aim.fov_origin = (v == "Kursor Mouse") and "mouse" or "center"
+            local map = { ["Vital"] = "vital", ["Kepala"] = "head", ["Badan"] = "body", ["Kaki"] = "legs" }
+            State.aim.bone = map[v] or "vital"
         end,
     })
-
-    panel:AddDivider()
-
-    panel:AddSlider("HushAimFov", {
-        Text = "FOV Radius",
-        Default = 90,
-        Min = 10,
-        Max = 360,
-        Rounding = 0,
-        Suffix = "°",
+    panel:AddDropdown("HushAimKind", {
+        Text = "Targets", Values = { "Semua", "Listener", "Hound", "Brute", "Watcher", "Pemain" }, Default = "Semua",
+        Callback = function(v)
+            local map = { ["Semua"] = "all", ["Listener"] = "listener", ["Hound"] = "hound", ["Brute"] = "brute", ["Watcher"] = "watcher", ["Pemain"] = "human" }
+            State.aim.target_kind = map[v] or "all"
+        end,
+    })
+    local settings = tab:AddGroupbox({ Side = "Right", Name = "Aim Settings", IconName = "settings" })
+    settings:AddSlider("HushAimFov", {
+        Text = "FOV", Default = 90, Min = 10, Max = 360, Rounding = 0, Suffix = "°",
         Callback = function(v) State.aim.fov = v end,
     })
-
-    panel:AddSlider("HushAimSmooth", {
-        Text = "Smoothness",
-        Default = 35,
-        Min = 2,
-        Max = 100,
-        Rounding = 0,
-        Suffix = "%",
-        Tooltip = "Kecepatan interpolasi kamera per frame (dikunci maksimal 3.0 deg/frame).",
+    settings:AddSlider("HushAimSmooth", {
+        Text = "Smoothness", Default = 35, Min = 2, Max = 100, Rounding = 0, Suffix = "%",
         Callback = function(v) State.aim.smooth = v end,
     })
-
-    panel:AddSlider("HushAimDist", {
-        Text = "Max Distance",
-        Default = 600,
-        Min = 50,
-        Max = 1500,
-        Rounding = 0,
-        Suffix = "m",
+    settings:AddSlider("HushAimDist", {
+        Text = "Distance", Default = 600, Min = 50, Max = 1500, Rounding = 0, Suffix = " st",
         Callback = function(v) State.aim.max_distance = v end,
     })
-
-    local panel2 = tab:AddGroupbox({
-        Side = "Right",
-        Name = "Camera Aim & Visibility",
-        IconName = "shield",
-    })
-
-
-
-
-
-    panel2:AddLabel("Compatibility: weapon hooks disabled.")
-    panel2:AddLabel("Silent / No Recoil / No Spread / Voice block quarantined.")
-    panel2:AddDivider()
-
-    panel2:AddToggle("HushAimVisible", {
-        Text = "Visible Only (Bullet Raycast)",
-        Default = false,
-        Tooltip = "Raycast CollisionGroup = 'Bullets' (tembus kaca & part transparan minimal 0.9).",
-        Callback = function(v) State.aim.visible_only = v end,
-    })
-
-    panel2:AddToggle("HushAimWallFallback", {
-        Text = "Multi-Point Wall Fallback",
-        Default = false,
-        Tooltip = "Jika kepala tertutup tembok, otomatis cari anggota tubuh lain yang terlihat.",
-        Callback = function(v) State.aim.wall_fallback = v end,
-    })
-
-    panel2:AddToggle("HushAimSticky", {
-        Text = "Sticky Target Lock",
-        Default = false,
-        Tooltip = "Pertahankan target yang sedang dikunci sampai mati atau keluar FOV.",
-        Callback = function(v) State.aim.sticky_lock = v end,
-    })
-
-    panel2:AddToggle("HushAimGravity", {
-        Text = "Ballistic Drop & Velocity Lead",
-        Default = false,
-        Tooltip = "Solver 4-iterasi eksak Shared.Ballistics.arcAt sesuai senjata di tangan (heldId).",
-        Callback = function(v) State.aim.gravity_comp = v end,
-    })
-
-
-
-    panel2:AddToggle("HushAimCircle", {
-        Text = "Show FOV Circle",
-        Default = false,
-        Tooltip = "Otomatis ON saat Aimbot diaktifkan. Bisa dimatikan manual; hijau saat target terkunci.",
-        Callback = function(v) State.aim.fov_circle = v end,
-    })
-
-    panel2:AddDivider()
-
-    local status = panel2:AddLabel("Target: Ready")
-    local function status_write(text)
-        State.aim.last_diag = text
-        safe_label_write(status, text)
-    end
-
-    add_button_compat(panel2, "HushAimProbe", {
-        Text = "Inspect Locked Target",
-        Func = function()
-            local cam = workspace.CurrentCamera
-            if not cam then
-                status_write("Target: No camera")
-                return
-            end
-            local target = aim_get_current_target()
-            local ballistics = aim_ballistics()
-            if not target then
-                status_write(string.format("Target: None in %d° / %dm", State.aim.fov, State.aim.max_distance))
-                return
-            end
-            local origin = get_muzzle_origin()
-            local _, flight = aim_solve_point(
-                origin, target.part.Position, target.part.AssemblyLinearVelocity, ballistics, false
-            )
-            status_write(string.format(
-                "%s · %s (%.0fm) | %.3fs | %s v=%.0f",
-                target.model.Name, target.part.Name, target.dist, flight, tostring(ballistics.slot), ballistics.velocity
-            ))
-        end,
-    })
-
-    add_button_compat(panel2, "HushAimStats", {
-        Text = "Read Session Telemetry",
-        Func = function()
-            local s = State.aim.stats
-            status_write(string.format(
-                "Lock %d | Peak %.2f° | Shots %d | Hits %d (%d victims)",
-                s.acquired or 0, s.peak_deg or 0, s.fired or 0, State.aim.session_hits or 0, aim_victim_count()
-            ))
-        end,
-    })
-
-    add_button_compat(panel2, "HushAimReset", {
-        Text = "Reset Telemetry Counters",
-        Func = function()
-            State.aim.session_hits = 0
-            State.aim.session_victims = {}
-            State.aim.last_victim = nil
-            State.aim.stats = {
-                acquired = 0, steps = 0, frames = 0, peak_deg = 0, fired = 0,
-                args_logged = false, gun_arg_shape = "", gun_arg_count = 0,
-            }
-            status_write("Telemetry reset.")
-        end,
-    })
+    settings:AddLabel("Camera-only compatibility build.")
+    settings:AddLabel("Silent Aim is unavailable: first-shot crash unresolved.")
 end
 
 -- TAB 2: VISUALS (Entity ESP + World Lighting + Loot & Container Radar)
 local function init_visuals_tab(tab)
     local layout = tab:AddGroupbox({ Side = "Left", Name = "ESP Layout", IconName = "scan-eye" })
-    layout:AddToggle("HushESPDeclutter", {
-        Text = "Reduce label overlap", Default = false,
-        Tooltip = "Prioritize threats, keep the crosshair clear, and hide overlapping labels. Outlines stay visible.",
-        Callback = function(v) State.esp.declutter = v end,
-    })
+    layout:AddLabel("Anti-overlap and player visibility: automatic.")
     layout:AddSlider("HushESPInstances", {
         Text = "Label objects (nearest first)", Default = 48, Min = 12, Max = 96, Rounding = 0,
         Callback = function(v) State.esp.render_limit = v end,

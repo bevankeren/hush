@@ -2349,7 +2349,7 @@ local function init_combat_tab(tab)
         Max = 100,
         Rounding = 0,
         Suffix = "%",
-        Tooltip = "Kecepatan interpolasi kamera per frame (dikunci <= 3.0 deg/frame).",
+        Tooltip = "Kecepatan interpolasi kamera per frame (dikunci maksimal 3.0 deg/frame).",
         Callback = function(v) State.aim.smooth = v end,
     })
 
@@ -2394,7 +2394,7 @@ local function init_combat_tab(tab)
     panel2:AddToggle("HushAimVisible", {
         Text = "Visible Only (Bullet Raycast)",
         Default = false,
-        Tooltip = "Raycast CollisionGroup = 'Bullets' (tembus kaca & part transparan >= 0.9).",
+        Tooltip = "Raycast CollisionGroup = 'Bullets' (tembus kaca & part transparan minimal 0.9).",
         Callback = function(v) State.aim.visible_only = v end,
     })
 
@@ -2678,7 +2678,7 @@ local function init_player_audio_tab(tab)
     panel_mov:AddToggle("HushSafeSpeed", {
         Text = "Safe WalkSpeed Override",
         Default = false,
-        Tooltip = "Naikkan kecepatan jalan tanpa menguras stamina (dikunci <= 20 stud/s di bawah SustainSpeed 24).",
+        Tooltip = "Naikkan kecepatan jalan tanpa menguras stamina (dikunci maksimal 20 stud/s di bawah SustainSpeed 24).",
         Callback = function(v) apply_movement(v) end,
     })
 
